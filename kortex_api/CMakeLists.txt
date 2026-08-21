@@ -3,8 +3,8 @@ include(FetchContent)
 #include(ExternalProject)
 FetchContent_Declare(
   kinova_binary_api
-  URL https://artifactory.kinovaapps.com/artifactory/generic-public/kortex/API/2.8.0/linux_x86-64_gcc_5.4.zip
-  URL_HASH MD5=b9b68885df8e1dd0e5a2ba7285f14c0d
+  URL https://artifactory.kinovaapps.com:443/artifactory/generic-public/kortex/API/2.8.0/linux_aarch64_gcc_7.4.zip
+  URL_HASH MD5=5c0998d099310f0cf7f9a4039cf1cafd
 )
 
 FetchContent_MakeAvailable(kinova_binary_api)
@@ -18,12 +18,11 @@ project(kortex_api)
 # string(REPLACE "_" "-" URL_PROCESSOR ${CMAKE_SYSTEM_PROCESSOR}) # x86_64 -> x86-64
 # string(TOLOWER ${CMAKE_SYSTEM_NAME} URL_OS) # Linux -> linux
 
-#Current: only support Linux x86_64
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
-  set(API_URL https://artifactory.kinovaapps.com/artifactory/generic-public/kortex/API/2.8.0/linux_x86-64_gcc_5.4.zip)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+  set(API_URL https://artifactory.kinovaapps.com:443/artifactory/generic-public/kortex/API/2.8.0/linux_aarch64_gcc_7.4.zip)
 else()
   set(API_URL "")
-  message(FATAL_ERROR "Unsupported System: currently support is for Linux x68_64. Detected ${CMAKE_SYSTEM_NAME} and ${CMAKE_SYSTEM_PROCESSOR}")
+  message(FATAL_ERROR "Unsupported System: currently support is for Linux aarch64. Detected ${CMAKE_SYSTEM_NAME} and ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
 #ExternalProject_Add(kinova_binary_api
