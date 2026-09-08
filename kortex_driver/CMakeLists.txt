@@ -1,12 +1,10 @@
 cmake_minimum_required(VERSION 3.14)
 include(FetchContent)
-FetchContent_Declare(
-  kinova_binary_api
-  URL https://artifactory.kinovaapps.com:443/artifactory/generic-public/kortex/API/2.5.0/linux_x86-64_x86_gcc.zip
-  URL_HASH MD5=64bd86e7ab8bda90ef1fc7d6a356e080
-)
-FetchContent_MakeAvailable(kinova_binary_api)
 
+# NOTE: the archive is selected and fetched AFTER project(), because CMake does
+# not populate CMAKE_SYSTEM_NAME / CMAKE_SYSTEM_PROCESSOR until then. Upstream
+# sidestepped that by hardcoding the x86 URL up here, which is also why the
+# arch check further down could only ever fail.
 project(kortex_driver)
 
 # Default to C++14
@@ -28,15 +26,35 @@ find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(kortex_api REQUIRED)
 
-#Current: only support Linux x86_64
+# This is the second, independent arch gate in ros2_kortex - kortex_api has
+# its own - and it pins a DIFFERENT API version, 2.5.0 against kortex_api's
+# 2.8.0. That matters here because Kinova never published an aarch64 build of
+# 2.5.0: that release has x86-64 and 32-bit ARM only. 2.8.0 does have one, and
+# kortex_api already fetches 2.8.0, so on aarch64 we take the static library
+# from 2.8.0 as well. The aarch64 build is therefore MORE self-consistent than
+# the x86 one, which links a 2.5.0 library against 2.8.0 headers.
+#
+# x86_64 is left exactly as upstream ships it. It is known-good and churning
+# it to 2.8.0 would be a real behavioural change for no reason we have.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
-  set(API_URL https://artifactory.kinovaapps.com:443/artifactory/generic-public/kortex/API/2.5.0/linux_x86-64_x86_gcc.zip)
+  set(API_URL "https://artifactory.kinovaapps.com:443/artifactory/generic-public/kortex/API/2.5.0/linux_x86-64_x86_gcc.zip")
+  set(API_MD5 "64bd86e7ab8bda90ef1fc7d6a356e080")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  set(API_URL "https://artifactory.kinovaapps.com:443/artifactory/generic-public/kortex/API/2.8.0/linux_aarch64_gcc_5.4.zip")
+  set(API_MD5 "062a42ac43a883e7aa48ef6ee53aca1f")
 else()
-  # TODO(future) to support ARM or other builds logic could go here to fetch the precompiled libKortexApiCpp.a
-  # see notes in kortex_api CMakeList.txt
-  message(WARNING "Detected ${CMAKE_SYSTEM_NAME} and ${CMAKE_SYSTEM_PROCESSOR}")
-  message(FATAL_ERROR "Unsupported System: currently support is for Linux x68_64.")
+  message(FATAL_ERROR
+    "No Kortex binary API for ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}. "
+    "Supported: Linux x86_64, Linux aarch64.")
 endif()
+
+FetchContent_Declare(
+  kinova_binary_api
+  URL "${API_URL}"
+  URL_HASH MD5=${API_MD5}
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(kinova_binary_api)
 
 # CMake does not allow IMPORTED libraries to be installed
 # The package kortex_api will download and setup the include directories
