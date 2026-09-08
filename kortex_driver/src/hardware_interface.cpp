@@ -203,6 +203,7 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
   RCLCPP_INFO(LOGGER, "Creating session for communication");
   session_manager_.CreateSession(create_session_info);
   session_manager_real_time_.CreateSession(create_session_info);
+  api_connected_ = true;
   RCLCPP_INFO(LOGGER, "Session created");
 
   // reset faults on activation, go back to low level servoing after
@@ -706,7 +707,30 @@ CallbackReturn KortexMultiInterfaceHardware::on_activate(
   const rclcpp_lifecycle::State & /* previous_state */)
 {
   RCLCPP_INFO(LOGGER, "Activating KortexMultiInterfaceHardware...");
-  // first read
+
+  // Coming back from a deactivation needs no reconnect: on_deactivate leaves
+  // the API connection up and only drops the arm to SINGLE_LEVEL_SERVOING, so
+  // activation is simply the reverse of that.
+  //
+  // Reconnecting instead was tried and does not work. The transports can be
+  // reconnected and the routers reactivated, but nothing re-registers the
+  // router's onMessage() callback on the transport, so the receive thread
+  // invokes an empty std::function and throws std::bad_function_call from
+  // TransportClientTcp::receiveThread -- on a detached thread, which aborts
+  // ros2_control_node rather than failing the transition. The callback is
+  // registered in RouterClient's constructor and there is no public way to
+  // re-register it, so the connection must simply not be torn down.
+  //
+  // Setting the mode unconditionally matches on_init, which also ends in
+  // LOW_LEVEL_SERVOING every time.
+  servoing_mode_hw_.set_servoing_mode(Kinova::Api::Base::LOW_LEVEL_SERVOING);
+  base_.SetServoingMode(servoing_mode_hw_);
+  arm_mode_ = Kinova::Api::Base::LOW_LEVEL_SERVOING;
+
+  // add_actuators() appends, and on_activate can now run more than once, so
+  // without this the repeated field grows by actuator_count_ per activation.
+  base_command_.clear_actuators();
+
   auto base_feedback = base_cyclic_.RefreshFeedback();
 
   // Add each actuator to the base_command_ and set the command to its current position
@@ -725,6 +749,10 @@ CallbackReturn KortexMultiInterfaceHardware::on_activate(
 
   // Initialize interconnect command to current gripper position.
   base_command_.mutable_interconnect()->mutable_command_id()->set_identifier(0);
+  // Clear before adding: add_motor_cmd() appends, and on_activate can now run
+  // more than once, so without this the repeated field grows by one entry per
+  // activation and the gripper command we hold is not the only one sent.
+  base_command_.mutable_interconnect()->mutable_gripper_command()->clear_motor_cmd();
   gripper_motor_command_ =
     base_command_.mutable_interconnect()->mutable_gripper_command()->add_motor_cmd();
   gripper_motor_command_->set_position(gripper_initial_position);  // % position
@@ -786,22 +814,69 @@ CallbackReturn KortexMultiInterfaceHardware::on_deactivate(
   servoing_mode.set_servoing_mode(k_api::Base::ServoingMode::SINGLE_LEVEL_SERVOING);
   base_.SetServoingMode(servoing_mode);
 
-  // Close API session
-  session_manager_.CloseSession();
-  session_manager_real_time_.CloseSession();
+  // The API connection is deliberately left UP, and the sessions open.
+  //
+  // Deactivating is a handover, not a shutdown: SINGLE_LEVEL_SERVOING above is
+  // what frees the arm for the teach pendant and admittance mode, and that is
+  // all the caller wants. Closing the sessions and dropping the transports as
+  // well made deactivation a one-way door, because the connection cannot be
+  // rebuilt from on_activate (see the note there).
+  //
+  // The teardown now lives in on_cleanup/on_shutdown, so a real shutdown still
+  // closes its sessions politely instead of leaving the arm holding them until
+  // they time out.
 
-  // Deactivate the router and cleanly disconnect from the transport object
+  // k_api_twist_ and gripper_motor_command_ used to be deleted here. Both
+  // point INTO protobuf messages that own them -- mutable_twist() and
+  // add_motor_cmd() respectively -- so deleting them was undefined behaviour,
+  // and it orphaned k_api_twist_, which is assigned only in on_init, leaving
+  // sendTwistCommand() writing through a dangling pointer after any
+  // deactivate/activate cycle. The owning messages are members and free their
+  // own storage.
+
+  RCLCPP_INFO(LOGGER, "KortexMultiInterfaceHardware successfully deactivated!");
+
+  return CallbackReturn::SUCCESS;
+}
+
+void KortexMultiInterfaceHardware::disconnectApi()
+{
+  if (!api_connected_)
+  {
+    return;
+  }
+  api_connected_ = false;
+
+  RCLCPP_INFO(LOGGER, "Closing Kortex sessions and disconnecting.");
+  try
+  {
+    session_manager_.CloseSession();
+    session_manager_real_time_.CloseSession();
+  }
+  catch (const std::exception & ex)
+  {
+    // Worth logging but not worth failing the transition: we are on the way
+    // out either way, and an unreachable arm cannot be told politely.
+    RCLCPP_WARN_STREAM(LOGGER, "While closing the Kortex sessions: " << ex.what());
+  }
+
   router_tcp_.SetActivationStatus(false);
   transport_tcp_.disconnect();
   router_udp_realtime_.SetActivationStatus(false);
   transport_udp_realtime_.disconnect();
+}
 
-  // memory handling
-  delete k_api_twist_;
-  delete gripper_motor_command_;
+CallbackReturn KortexMultiInterfaceHardware::on_cleanup(
+  const rclcpp_lifecycle::State & /* previous_state */)
+{
+  disconnectApi();
+  return CallbackReturn::SUCCESS;
+}
 
-  RCLCPP_INFO(LOGGER, "KortexMultiInterfaceHardware successfully deactivated!");
-
+CallbackReturn KortexMultiInterfaceHardware::on_shutdown(
+  const rclcpp_lifecycle::State & /* previous_state */)
+{
+  disconnectApi();
   return CallbackReturn::SUCCESS;
 }
 

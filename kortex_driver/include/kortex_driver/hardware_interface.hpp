@@ -108,6 +108,13 @@ public:
   KORTEX_DRIVER_PUBLIC
   CallbackReturn on_deactivate(const rclcpp_lifecycle::State & previous_state) final;
 
+  // The API teardown lives here, not in on_deactivate. Deactivating is a
+  // handover -- the arm drops to SINGLE_LEVEL_SERVOING so the pendant works,
+  // and the connection stays up so it can be taken back. Tearing the
+  // connection down belongs to the transitions that really are the end.
+  CallbackReturn on_cleanup(const rclcpp_lifecycle::State & previous_state) override;
+  CallbackReturn on_shutdown(const rclcpp_lifecycle::State & previous_state) override;
+
   KORTEX_DRIVER_PUBLIC
   return_type read(const rclcpp::Time & time, const rclcpp::Duration & period) final;
 
@@ -115,6 +122,11 @@ public:
   return_type write(const rclcpp::Time & time, const rclcpp::Duration & period) final;
 
 private:
+  // Close the sessions and drop both transports. Idempotent: on_cleanup and
+  // on_shutdown are not mutually exclusive and either may be skipped.
+  void disconnectApi();
+  bool api_connected_{false};
+
   k_api::TransportClientTcp transport_tcp_;
   k_api::RouterClient router_tcp_;
   k_api::SessionManager session_manager_;
