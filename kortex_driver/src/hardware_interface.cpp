@@ -1192,9 +1192,15 @@ void KortexMultiInterfaceHardware::sendTwistCommand()
   k_api_twist_->set_linear_x(static_cast<float>(twist_commands_[0]));
   k_api_twist_->set_linear_y(static_cast<float>(twist_commands_[1]));
   k_api_twist_->set_linear_z(static_cast<float>(twist_commands_[2]));
-  k_api_twist_->set_angular_x(static_cast<float>(twist_commands_[3]));
-  k_api_twist_->set_angular_y(static_cast<float>(twist_commands_[4]));
-  k_api_twist_->set_angular_z(static_cast<float>(twist_commands_[5]));
+  // The Kortex API takes angular velocity in DEGREES per second, while the
+  // ros2_control twist interface is rad/s like every other ROS angular rate.
+  // Passing radians straight through makes every commanded rotation 57x too
+  // small, which presents as Cartesian rotation not working at all while
+  // translation is fine. The joint path already converts with toDeg for both
+  // position and velocity; this one was missed.
+  k_api_twist_->set_angular_x(static_cast<float>(KortexMathUtil::toDeg(twist_commands_[3])));
+  k_api_twist_->set_angular_y(static_cast<float>(KortexMathUtil::toDeg(twist_commands_[4])));
+  k_api_twist_->set_angular_z(static_cast<float>(KortexMathUtil::toDeg(twist_commands_[5])));
   base_.SendTwistCommand(k_api_twist_command_);
 }
 
