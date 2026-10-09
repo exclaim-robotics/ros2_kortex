@@ -141,7 +141,7 @@ private:
   // Control of the robot arm itself
   k_api::Base::BaseClient base_;
   k_api::BaseCyclic::BaseCyclicClient base_cyclic_;
-  // Used to switch individual actuators between POSITION and VELOCITY control mode
+  // Used to switch individual actuators between POSITION, VELOCITY and TORQUE control mode
   k_api::ActuatorConfig::ActuatorConfigClient actuator_config_;
   k_api::BaseCyclic::Command base_command_;
   std::size_t actuator_count_;
@@ -211,8 +211,46 @@ private:
   // different actuator control mode on the robot.
   bool start_joint_velocity_control_;
   bool start_joint_position_control_;
+  bool start_joint_effort_control_;
   // True while the active joint based controller commands joint velocities instead of positions.
   bool use_velocity_command_;
+  // True while the actuators in torque_joints_ are in TORQUE mode and follow
+  // arm_commands_efforts_. The other arm joints stay in POSITION mode, holding.
+  bool use_effort_command_;
+  // Arm joint names in actuator order (info_.joints without the gripper).
+  std::vector<std::string> arm_joint_names_;
+  // Arm joints (actuator order) whose effort interface the starting (running) controller claims.
+  std::vector<bool> start_torque_joints_;
+  std::vector<bool> torque_joints_;
+
+  // Torque sign. Everything ROS sees is in the ROS convention: positive torque drives the joint
+  // positive. kortex reports joint torque the other way round on every joint (measured
+  // 2026-10-08), so the effort state is negated. The command sign is a separate fact
+  // (effort_command_signs, per joint) and must be measured, not inferred from the reported one.
+  static constexpr double REPORTED_TORQUE_SIGN = -1.0;
+  std::vector<double> effort_command_signs_;
+  bool effort_command_signs_set_ = false;
+
+  // Torque mode safety. Kinova does not compensate gravity in TORQUE mode: whatever is sent is
+  // what the joint gets, so every command is clamped to the joint's URDF effort limit and may
+  // change by at most effort_command_max_step_ per cycle, so a late or stale cycle cannot jump
+  // the arm. last_effort_commands_ is what was actually sent (ROS convention, N*m).
+  std::vector<double> effort_limits_;
+  double effort_command_max_step_ = 0.5;
+  std::vector<double> last_effort_commands_;
+
+  // Startup sign check, for effort_startup_check_ms_ inside the mode switch, while the driver
+  // holds each torque joint at the torque it measured just before. The effort sensor reads the
+  // torque passed on to the link, so it does NOT follow the command in general (a free joint
+  // under a torque pulse reads ~0, measured on joint_6 2026-10-08), and this is no check to run
+  // under a controller. While holding a gravity load it does work: with a wrong command sign
+  // the motor pushes with the load instead of against it and the reading flips. A joint whose
+  // measured effort has the opposite sign to its command, by more than
+  // effort_check_tolerance_, for effort_check_cycles_ cycles in a row fails the activation.
+  double effort_check_tolerance_ = 1.0;
+  int effort_check_cycles_ = 5;
+  int effort_startup_check_ms_ = 150;
+  std::vector<int> effort_disagreement_cycles_;
 
   // first pass flag
   bool first_pass_;
@@ -236,8 +274,22 @@ private:
   void incrementId();
   void sendJointCommands();
   void prepareCommands();
-  // Set every arm actuator into the given control mode (POSITION or VELOCITY).
-  void setActuatorsControlMode(k_api::ActuatorConfig::ControlMode control_mode);
+  // Set the arm actuators (all, or those in joints) into the given control mode (POSITION,
+  // VELOCITY or TORQUE). Returns false (and logs) if the robot refused it for any actuator.
+  bool setActuatorsControlMode(
+    k_api::ActuatorConfig::ControlMode control_mode, const std::vector<bool> & joints = {});
+  // Put the torque_joints_ actuators into TORQUE mode without moving the arm, then run the
+  // startup sign check (see the definition). On failure the arm is left in POSITION mode,
+  // holding.
+  bool enterTorqueMode();
+  // Put the torque_joints_ actuators back into POSITION mode holding where they are now.
+  void leaveTorqueMode();
+  // False once a torque joint's measured effort has disagreed with its command (see above).
+  bool effortSignsAgree();
+  // Seed the position command, here and on the robot, with the measured position.
+  void holdMeasuredPosition();
+  // Send base_command_ once, outside the control loop, during a mode switch.
+  bool sendHoldFrame();
   void sendGripperCommand(
     k_api::Base::ServoingMode arm_mode, double position, double velocity, double force);
 
