@@ -5,6 +5,25 @@
   <!-- Propagate last link name information because it is the gripper's parent link -->
   <xacro:property name="last_arm_link" value="end_effector_link"/>
 
+  <!-- Per-link inertials from outside: define kortex_inertials before
+       load_robot as {link: {mass: kg, com: [x, y, z] (m, link frame),
+       inertia: [ixx, ixy, ixz, iyy, iyz, izz] (kg m^2, about the com)}},
+       unprefixed link names. Once defined it is the only source: every link
+       must be in it, with every key (rackthor loads and checks it from
+       rackthor_description/config/arm_inertials.yaml). Left undefined, the
+       CAD values below stand, as upstream. -->
+  <xacro:property name="kortex_inertials" default=""/>
+  <xacro:macro name="kortex_inertial" params="link xyz mass ixx ixy ixz iyy iyz izz">
+    <xacro:property name="cad" value="${kortex_inertials == ''}"/>
+    <xacro:property name="o" value="${dict() if cad else kortex_inertials[link]}"/>
+    <xacro:property name="i" value="${[ixx, ixy, ixz, iyy, iyz, izz] if cad else o['inertia']}"/>
+    <inertial>
+      <origin xyz="${xyz if cad else ' '.join(map(str, o['com']))}" rpy="0 0 0" />
+      <mass value="${mass if cad else o['mass']}" />
+      <inertia ixx="${i[0]}" ixy="${i[1]}" ixz="${i[2]}" iyy="${i[3]}" iyz="${i[4]}" izz="${i[5]}" />
+    </inertial>
+  </xacro:macro>
+
   <xacro:macro name="load_arm" params="
     parent
     dof
@@ -23,6 +42,7 @@
     gripper_joint_name
     gripper_max_velocity:=100.0
     gripper_max_force:=100.0
+    effort_command_signs:=''
     use_fake_hardware:=false
     fake_sensor_commands:=false
     sim_gazebo:=false
@@ -55,6 +75,7 @@
       use_internal_bus_gripper_comm="${use_internal_bus_gripper_comm}"
       gripper_max_velocity="${gripper_max_velocity}"
       gripper_max_force="${gripper_max_force}"
+      effort_command_signs="${effort_command_signs}"
       gripper_joint_name="${gripper_joint_name}"
       gripper="${gripper}"/>
 
@@ -64,11 +85,7 @@
       <child link="${prefix}base_link" />
     </joint>
     <link name="${prefix}base_link">
-      <inertial>
-        <origin xyz="-0.000648 -0.000166 0.084487" rpy="0 0 0" />
-        <mass value="1.697" />
-        <inertia ixx="0.004622" ixy="9E-06" ixz="6E-05" iyy="0.004495" iyz="9E-06" izz="0.002079" />
-      </inertial>
+      <xacro:kortex_inertial link="base_link" xyz="-0.000648 -0.000166 0.084487" mass="1.697" ixx="0.004622" ixy="9E-06" ixz="6E-05" iyy="0.004495" iyz="9E-06" izz="0.002079" />
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0" />
         <geometry>
@@ -86,11 +103,7 @@
       </collision>
     </link>
     <link name="${prefix}shoulder_link">
-      <inertial>
-        <origin xyz="-2.3E-05 -0.010364 -0.07336" rpy="0 0 0" />
-        <mass value="1.377" />
-        <inertia ixx="0.00457" ixy="1E-06" ixz="2E-06" iyy="0.004831" iyz="0.000448" izz="0.001409" />
-      </inertial>
+      <xacro:kortex_inertial link="shoulder_link" xyz="-2.3E-05 -0.010364 -0.07336" mass="1.377" ixx="0.00457" ixy="1E-06" ixz="2E-06" iyy="0.004831" iyz="0.000448" izz="0.001409" />
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0" />
         <geometry>
@@ -141,19 +154,7 @@
     </xacro:unless>
 
     <link name="${prefix}bicep_link">
-      <inertial>
-        <origin
-          xyz="3.5E-05 -0.208207 -0.01889"
-          rpy="0 0 0" />
-        <mass value="1.262" />
-        <inertia
-          ixx="0.046752"
-          ixy="-9E-06"
-          ixz="0"
-          iyy="0.00085"
-          iyz="-9.8E-05"
-          izz="0.047188" />
-      </inertial>
+      <xacro:kortex_inertial link="bicep_link" xyz="3.5E-05 -0.208207 -0.01889" mass="1.262" ixx="0.046752" ixy="-9E-06" ixz="0" iyy="0.00085" iyz="-9.8E-05" izz="0.047188" />
       <visual>
         <origin
           xyz="0 0 0"
@@ -182,11 +183,7 @@
       <limit lower="-2.24" upper="2.24" effort="39" velocity="1.3963" />
     </joint>
     <link name="${prefix}forearm_link">
-      <inertial>
-        <origin xyz="1.8E-05 0.076168 -0.01397" rpy="0 0 0" />
-        <mass value="0.93" />
-        <inertia ixx="0.008292" ixy="-1E-06" ixz="0" iyy="0.000628" iyz="0.000432" izz="0.008464" />
-      </inertial>
+      <xacro:kortex_inertial link="forearm_link" xyz="1.8E-05 0.076168 -0.01397" mass="0.93" ixx="0.008292" ixy="-1E-06" ixz="0" iyy="0.000628" iyz="0.000432" izz="0.008464" />
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0" />
         <geometry>
@@ -211,11 +208,7 @@
       <limit lower="-2.57" upper="2.57" effort="39" velocity="1.3963" />
     </joint>
     <link name="${prefix}spherical_wrist_1_link">
-      <inertial>
-        <origin xyz="-1E-06 0.008486 -0.062937" rpy="0 0 0" />
-        <mass value="0.6781" />
-        <inertia ixx="0.001645" ixy="0" ixz="0" iyy="0.001666" iyz="-0.000234" izz="0.000389" />
-      </inertial>
+      <xacro:kortex_inertial link="spherical_wrist_1_link" xyz="-1E-06 0.008486 -0.062937" mass="0.6781" ixx="0.001645" ixy="0" ixz="0" iyy="0.001666" iyz="-0.000234" izz="0.000389" />
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0" />
         <geometry>
@@ -251,11 +244,7 @@
       </joint>
     </xacro:unless>
     <link name="${prefix}spherical_wrist_2_link">
-      <inertial>
-        <origin xyz="-1E-06 0.046429 -0.008704" rpy="0 0 0" />
-        <mass value="0.678" />
-        <inertia ixx="0.001685" ixy="0" ixz="0" iyy="0.0004" iyz="0.000255" izz="0.001696" />
-      </inertial>
+      <xacro:kortex_inertial link="spherical_wrist_2_link" xyz="-1E-06 0.046429 -0.008704" mass="0.678" ixx="0.001685" ixy="0" ixz="0" iyy="0.0004" iyz="0.000255" izz="0.001696" />
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0" />
         <geometry>
@@ -281,11 +270,7 @@
     </joint>
     <xacro:if value="${vision}">
     <link name="${prefix}bracelet_link">
-      <inertial>
-        <origin xyz="0.000281 0.011402 -0.029798" rpy="0 0 0" />
-        <mass value="0.5" />
-        <inertia ixx="0.000587" ixy="3E-06" ixz="3E-06" iyy="0.000369" iyz="-0.000118" izz="0.000609" />
-      </inertial>
+      <xacro:kortex_inertial link="bracelet_link" xyz="0.000281 0.011402 -0.029798" mass="0.5" ixx="0.000587" ixy="3E-06" ixz="3E-06" iyy="0.000369" iyz="-0.000118" izz="0.000609" />
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0" />
         <geometry>
@@ -305,11 +290,7 @@
     </xacro:if>
     <xacro:unless value="${vision}">
     <link name="${prefix}bracelet_link">
-      <inertial>
-        <origin xyz="-9.3E-05 0.000132 -0.022905" rpy="0 0 0" />
-        <mass value="0.364" />
-        <inertia ixx="0.000214" ixy="0" ixz="1E-06" iyy="0.000223" iyz="-2E-06" izz="0.00024" />
-      </inertial>
+      <xacro:kortex_inertial link="bracelet_link" xyz="-9.3E-05 0.000132 -0.022905" mass="0.364" ixx="0.000214" ixy="0" ixz="1E-06" iyy="0.000223" iyz="-2E-06" izz="0.00024" />
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0" />
         <geometry>
