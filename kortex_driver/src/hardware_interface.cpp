@@ -41,7 +41,14 @@
 namespace
 {
 const rclcpp::Logger LOGGER = rclcpp::get_logger("KortexMultiInterfaceHardware");
+
+std::int64_t steadyNowNs()
+{
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+           std::chrono::steady_clock::now().time_since_epoch())
+    .count();
 }
+}  // namespace
 
 namespace kortex_driver
 {
@@ -339,6 +346,14 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
     {
       effort_startup_check_ms_ = std::stoi(param("effort_startup_check_ms"));
     }
+    if (!param("cyclic_async").empty())
+    {
+      cyclic_async_ = param("cyclic_async") == "true" || param("cyclic_async") == "True";
+    }
+    if (!param("feedback_timeout_ms").empty())
+    {
+      feedback_timeout_ = std::chrono::milliseconds(std::stoi(param("feedback_timeout_ms")));
+    }
   }
   catch (const std::exception & ex)
   {
@@ -361,6 +376,15 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
     "cycles, %d ms while holding at the switch",
     effort_command_max_step_, effort_check_tolerance_, effort_check_cycles_,
     effort_startup_check_ms_);
+  if (feedback_timeout_.count() <= 0)
+  {
+    RCLCPP_ERROR(LOGGER, "feedback_timeout_ms must be > 0!");
+    return CallbackReturn::ERROR;
+  }
+  RCLCPP_INFO(
+    LOGGER, "Cyclic exchange: %s, feedback timeout %ld ms",
+    cyclic_async_ ? "non-blocking (Refresh_callback)" : "blocking (Refresh)",
+    static_cast<long>(feedback_timeout_.count()));
 
   // "1 1 1 1 1 1" (or comma separated): +1 where kortex's torque_joint command already is in
   // the ROS convention, -1 where it is reversed. Kinova's example 108 commands the negated
@@ -822,6 +846,7 @@ return_type KortexMultiInterfaceHardware::perform_command_mode_switch(
     }
     // refresh feedback
     feedback_ = base_cyclic_.RefreshFeedback();
+    acceptBlockingFeedback();
   }
   if (start_twist_controller_)
   {
@@ -916,6 +941,7 @@ CallbackReturn KortexMultiInterfaceHardware::on_activate(
 
   // Send a first frame
   base_feedback = base_cyclic_.Refresh(base_command_);
+  acceptBlockingFeedback();
   // Set some default values
   for (std::size_t i = 0; i < actuator_count_; i++)
   {
@@ -1046,6 +1072,32 @@ return_type KortexMultiInterfaceHardware::read(
   {
     first_pass_ = false;
     feedback_ = base_cyclic_.RefreshFeedback();
+    acceptBlockingFeedback();
+  }
+
+  if (cyclic_async_)
+  {
+    // Take the newest reply if there is one. try_to_lock: the receive thread holds the lock only
+    // to copy a reply in, and waiting for it is exactly what this replaces -- on a miss, the
+    // reply is taken next cycle.
+    std::unique_lock<std::mutex> lock(replies_->mutex, std::try_to_lock);
+    if (lock.owns_lock() && replies_->fresh)
+    {
+      feedback_.Swap(&replies_->feedback);
+      replies_->fresh = false;
+    }
+  }
+  // A silent arm must not leave the controllers running on frozen feedback -- in_fault_ below
+  // is read from it too. (In blocking mode Refresh itself waits, and throws after 3 s.)
+  const std::int64_t unanswered_since = replies_->unanswered_since_ns.load();
+  const auto silent = std::chrono::nanoseconds(steadyNowNs() - unanswered_since);
+  if (unanswered_since != 0 && silent > feedback_timeout_)
+  {
+    RCLCPP_ERROR(
+      LOGGER, "No feedback from the arm for %ld ms (feedback_timeout_ms %ld)",
+      static_cast<long>(std::chrono::duration_cast<std::chrono::milliseconds>(silent).count()),
+      static_cast<long>(feedback_timeout_.count()));
+    return return_type::ERROR;
   }
 
   // read if robot is faulted
@@ -1100,7 +1152,7 @@ return_type KortexMultiInterfaceHardware::write(
 {
   if (block_write)
   {
-    feedback_ = base_cyclic_.RefreshFeedback();
+    cyclicRefresh(false);
     return return_type::OK;
   }
 
@@ -1173,7 +1225,7 @@ return_type KortexMultiInterfaceHardware::write(
       sendGripperCommand(
         arm_mode_, gripper_command_position_, gripper_speed_command_, gripper_force_command_);
       // read after write in twist mode
-      feedback_ = base_cyclic_.RefreshFeedback();
+      cyclicRefresh(false);
     }
     else if (
       (arm_mode_ == k_api::Base::ServoingMode::LOW_LEVEL_SERVOING) &&
@@ -1193,14 +1245,14 @@ return_type KortexMultiInterfaceHardware::write(
       else
       {
         // Keep alive mode - no controller active
-        feedback_ = base_cyclic_.RefreshFeedback();
+        cyclicRefresh(false);
         // RCLCPP_DEBUG(LOGGER, "No controller active in LOW_LEVEL_SERVOING mode !");
       }
     }
     else
     {
       // Keep alive mode - no controller active
-      feedback_ = base_cyclic_.RefreshFeedback();
+      cyclicRefresh(false);
       RCLCPP_DEBUG(
         LOGGER,
         "Fault was not recognized on the robot but combination of Control Mode and Active State "
@@ -1211,7 +1263,7 @@ return_type KortexMultiInterfaceHardware::write(
   {
     // this is needed when the robot was faulted
     // so we can internally conclude it is not faulted anymore
-    feedback_ = base_cyclic_.RefreshFeedback();
+    cyclicRefresh(false);
   }
 
   return return_type::OK;
@@ -1317,6 +1369,7 @@ bool KortexMultiInterfaceHardware::setActuatorsControlMode(
 void KortexMultiInterfaceHardware::holdMeasuredPosition()
 {
   feedback_ = base_cyclic_.RefreshFeedback();
+  acceptBlockingFeedback();
   for (std::size_t i = 0; i < actuator_count_; i++)
   {
     const float measured = feedback_.actuators(static_cast<int>(i)).position();  // deg
@@ -1336,6 +1389,7 @@ bool KortexMultiInterfaceHardware::sendHoldFrame()
   try
   {
     feedback_ = base_cyclic_.Refresh(base_command_);
+    acceptBlockingFeedback();
     return true;
   }
   catch (std::exception & ex)
@@ -1471,11 +1525,11 @@ void KortexMultiInterfaceHardware::sendJointCommands()
   // send the command to the robot
   try
   {
-    feedback_ = base_cyclic_.Refresh(base_command_);
+    cyclicRefresh(true);
   }
   catch (k_api::KDetailedException & ex)
   {
-    feedback_ = base_cyclic_.RefreshFeedback();
+    cyclicRefresh(false);
     RCLCPP_ERROR_STREAM(LOGGER, "Kortex exception: " << ex.what());
 
     RCLCPP_ERROR_STREAM(
@@ -1484,19 +1538,65 @@ void KortexMultiInterfaceHardware::sendJointCommands()
   }
   catch (std::runtime_error & ex_runtime)
   {
-    feedback_ = base_cyclic_.RefreshFeedback();
+    cyclicRefresh(false);
     RCLCPP_ERROR_STREAM(LOGGER, "Runtime error: " << ex_runtime.what());
   }
   catch (std::future_error & ex_future)
   {
-    feedback_ = base_cyclic_.RefreshFeedback();
+    cyclicRefresh(false);
     RCLCPP_ERROR_STREAM(LOGGER, "Future error: " << ex_future.what());
   }
   catch (std::exception & ex_std)
   {
-    feedback_ = base_cyclic_.RefreshFeedback();
+    cyclicRefresh(false);
     RCLCPP_ERROR_STREAM(LOGGER, "Standard exception: " << ex_std.what());
   }
+}
+
+void KortexMultiInterfaceHardware::cyclicRefresh(bool with_command)
+{
+  if (!cyclic_async_)
+  {
+    feedback_ = with_command ? base_cyclic_.Refresh(base_command_) : base_cyclic_.RefreshFeedback();
+    acceptBlockingFeedback();
+    return;
+  }
+  // Runs on the API's receive thread. Captures replies_, not this: it may outlive the driver.
+  auto on_reply = [replies = replies_, seq = ++next_seq_](
+                    const k_api::Error & err, const k_api::BaseCyclic::Feedback & feedback)
+  {
+    if (err.error_code() != k_api::ErrorCodes::ERROR_NONE)
+    {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(replies->mutex);
+    if (seq <= replies->seq)
+    {
+      return;  // overtaken by a newer reply, or sent before a blocking refresh
+    }
+    replies->feedback = feedback;
+    replies->seq = seq;
+    replies->fresh = true;
+    replies->unanswered_since_ns = 0;
+  };
+  std::int64_t none = 0;
+  replies_->unanswered_since_ns.compare_exchange_strong(none, steadyNowNs());
+  if (with_command)
+  {
+    base_cyclic_.Refresh_callback(base_command_, on_reply);
+  }
+  else
+  {
+    base_cyclic_.RefreshFeedback_callback(on_reply);
+  }
+}
+
+void KortexMultiInterfaceHardware::acceptBlockingFeedback()
+{
+  std::lock_guard<std::mutex> lock(replies_->mutex);
+  replies_->seq = next_seq_;
+  replies_->fresh = false;
+  replies_->unanswered_since_ns = 0;
 }
 
 void KortexMultiInterfaceHardware::incrementId()

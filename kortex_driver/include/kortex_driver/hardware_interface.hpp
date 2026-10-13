@@ -27,9 +27,11 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -147,6 +149,35 @@ private:
   std::size_t actuator_count_;
   // To minimize bandwidth we synchronize feedback with the robot only when write() is called
   k_api::BaseCyclic::Feedback feedback_;
+
+  // Cyclic exchange that does not hold up the controller manager. The per-cycle Refresh in
+  // write() was a synchronous round trip to the arm: ~0.35 ms, but 1-7 ms whenever the arm
+  // answered late, and the whole controller manager loop (gripper, F/T sensor, every controller)
+  // waited for it -- "Overrun detected!". write() now sends with Refresh_callback, as Kinova's
+  // example 200-Actuator_low_level_control/02 does, and returns; the reply lands on the API's
+  // receive thread and read() takes the newest one. Normally that is the reply to the previous
+  // cycle's frame, exactly what the blocking call gave; when the arm is late, read() keeps the
+  // last feedback instead of stalling, and fails once none has come for feedback_timeout_.
+  //
+  // Held by shared_ptr because the callbacks capture it: a reply may arrive after this object is
+  // gone. Replies carry a send sequence number, and only a newer one replaces the stored reply,
+  // so late or reordered replies -- and replies to frames sent before a blocking refresh in a
+  // mode switch -- never overwrite fresher feedback.
+  struct CyclicReplies
+  {
+    std::mutex mutex;
+    k_api::BaseCyclic::Feedback feedback;  // the newest reply, until read() takes it
+    bool fresh = false;                    // feedback not taken by read() yet
+    std::uint64_t seq = 0;                 // replies with seq <= this are dropped
+    // steady_clock ns of the oldest send not answered yet, 0 if none. Not "time since the last
+    // reply": a mode switch or fault reset can spend well over feedback_timeout_ on the TCP
+    // port without sending a cyclic frame, and that is not the arm going silent.
+    std::atomic<std::int64_t> unanswered_since_ns{0};
+  };
+  std::shared_ptr<CyclicReplies> replies_ = std::make_shared<CyclicReplies>();
+  std::uint64_t next_seq_ = 0;  // controller manager thread only
+  bool cyclic_async_ = true;    // false: the old blocking Refresh in write()
+  std::chrono::milliseconds feedback_timeout_{100};
   std::vector<double> arm_commands_positions_;
   std::vector<double> arm_commands_velocities_;
   std::vector<double> arm_commands_efforts_;
@@ -271,6 +302,12 @@ private:
   static constexpr double NO_CMD = std::numeric_limits<double>::quiet_NaN();
 
   void sendTwistCommand();
+  // The per-cycle exchange from write(): base_command_ and feedback (with_command) or feedback
+  // only. Does not wait unless cyclic_async_ is off.
+  void cyclicRefresh(bool with_command);
+  // After a blocking Refresh/RefreshFeedback has set feedback_ directly: drop every reply to a
+  // frame sent before it, and restart the feedback timeout.
+  void acceptBlockingFeedback();
   void incrementId();
   void sendJointCommands();
   void prepareCommands();
