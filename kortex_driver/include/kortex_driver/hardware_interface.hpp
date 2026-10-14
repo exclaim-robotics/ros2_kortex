@@ -230,6 +230,10 @@ private:
   double reset_fault_cmd_;
   double reset_fault_async_success_;
   double in_fault_;
+  // Fault and warning banks as last logged (base A, base B, then A/B per actuator), so a
+  // change is logged once, by name, instead of every cycle or never.
+  std::vector<uint32_t> logged_banks_;
+  void logBankChanges();
   static constexpr double NO_CMD = std::numeric_limits<double>::quiet_NaN();
 
   void sendTwistCommand();
