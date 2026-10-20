@@ -901,6 +901,17 @@ CallbackReturn KortexMultiInterfaceHardware::on_activate(
   // registered in RouterClient's constructor and there is no public way to
   // re-register it, so the connection must simply not be torn down.
   //
+  // Clear faults first, as on_init does: re-acquiring the arm is how an operator
+  // recovers it, so it should recover it.
+  try
+  {
+    base_.ClearFaults();
+  }
+  catch (k_api::KDetailedException & ex)
+  {
+    RCLCPP_ERROR_STREAM(LOGGER, "ClearFaults on activation: " << ex.what());
+  }
+
   // Setting the mode unconditionally matches on_init, which also ends in
   // LOW_LEVEL_SERVOING every time.
   servoing_mode_hw_.set_servoing_mode(Kinova::Api::Base::LOW_LEVEL_SERVOING);
@@ -1100,8 +1111,13 @@ return_type KortexMultiInterfaceHardware::read(
     return return_type::ERROR;
   }
 
-  // read if robot is faulted
+  // Whether the arm is faulted is the arm's own call (ARMSTATE_IN_FAULT), plus any live
+  // actuator fault. The base's fault banks are not part of it: they keep a fault latched after
+  // the arm has recovered and ClearFaults does not reset it (a JOINT_FAULT bit, 2026-10-14:
+  // arm state normal, every actuator clean, the Kinova's own admittance working), and counting
+  // it held every command back until a reconnect, with nothing in the log. They are logged.
   in_fault_ = (feedback_.base().active_state() == Kinova::Api::Common::ArmState::ARMSTATE_IN_FAULT);
+  logBankChanges();
 
   // read gripper state
   readGripperPosition();
@@ -1124,16 +1140,81 @@ return_type KortexMultiInterfaceHardware::read(
     //       feedback_.actuators(i).warning_bank_a() + feedback_.actuators(i).warning_bank_b());
   }
 
-  // add all base's faults and warnings into series
-  in_fault_ += (feedback_.base().fault_bank_a() + feedback_.base().fault_bank_b());
-
-  // TODO(livanov93): separate warnings into another variable to expose it via fault controller
-  //     + feedback_.base().warning_bank_a() + feedback_.base().warning_bank_b());
 
   // add mode that can't be easily reached
   in_fault_ += (feedback_.base().active_state() == k_api::Common::ARMSTATE_SERVOING_READY);
 
   return return_type::OK;
+}
+
+namespace
+{
+template <typename NameFn>
+std::string bitNames(uint32_t bits, NameFn name)
+{
+  std::string out;
+  for (uint32_t b = 1; b != 0; b <<= 1)
+  {
+    if (bits & b)
+    {
+      std::string n = name(static_cast<int>(b));
+      out += (out.empty() ? "" : " ") + (n.empty() ? std::to_string(b) : n);
+    }
+  }
+  return out.empty() ? "none" : out;
+}
+}  // namespace
+
+void KortexMultiInterfaceHardware::logBankChanges()
+{
+  // Rare (a fault or warning appearing or clearing), so logging here does not load the loop.
+  std::vector<uint32_t> banks{feedback_.base().fault_bank_a(), feedback_.base().fault_bank_b(),
+                              feedback_.base().warning_bank_a(), feedback_.base().warning_bank_b()};
+  for (std::size_t i = 0; i < actuator_count_; i++)
+  {
+    banks.push_back(feedback_.actuators(i).fault_bank_a());
+    banks.push_back(feedback_.actuators(i).warning_bank_a());
+  }
+  if (banks == logged_banks_)
+  {
+    return;
+  }
+  if (logged_banks_.size() != banks.size())
+  {
+    logged_banks_.assign(banks.size(), 0);
+  }
+  auto base_name = [](int v)
+  { return k_api::Base::SafetyIdentifier_Name(static_cast<k_api::Base::SafetyIdentifier>(v)); };
+  auto act_name = [](int v)
+  {
+    return k_api::ActuatorConfig::SafetyIdentifierBankA_Name(
+      static_cast<k_api::ActuatorConfig::SafetyIdentifierBankA>(v));
+  };
+  const auto state = k_api::Common::ArmState_Name(feedback_.base().active_state());
+  const char * kind[] = {"faults A", "faults B", "warnings A", "warnings B"};
+  for (std::size_t k = 0; k < 4; k++)
+  {
+    if (banks[k] != logged_banks_[k])
+    {
+      RCLCPP_WARN(
+        LOGGER, "Kinova base %s: %s (arm state %s)", kind[k], bitNames(banks[k], base_name).c_str(),
+        state.c_str());
+    }
+  }
+  for (std::size_t i = 0; i < actuator_count_; i++)
+  {
+    for (std::size_t k = 0; k < 2; k++)
+    {
+      const std::size_t j = 4 + 2 * i + k;
+      if (banks[j] != logged_banks_[j])
+      {
+        RCLCPP_WARN(
+          LOGGER, "Kinova joint_%zu %s: %s (arm state %s)", i + 1, k ? "warnings" : "faults",
+          bitNames(banks[j], act_name).c_str(), state.c_str());
+      }
+    }
+  }
+  logged_banks_ = banks;
 }
 
 void KortexMultiInterfaceHardware::readGripperPosition()
