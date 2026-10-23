@@ -21,6 +21,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace kortex_driver
 {
@@ -41,6 +42,11 @@ namespace kortex_driver
 //
 // It stops growing toward the effort limit while the sum is there (no wind-up against a clamp).
 // Off with a zero gain or limit.
+//
+// step()'s `torque_gain` is the fraction of what it is sent that the actuator delivers, measured
+// (parseTorqueGains): the command is divided by it before the integral is added, so the
+// integral is left only what the gain does not explain. joint_2 through TORQUE_HIGH_VELOCITY
+// delivered 0.86 of what it was sent less 1.3 N*m, holding 11, 19 and 27 N*m (2026-10-23).
 // C++14, as the driver's own default (no std::clamp).
 struct TorqueIntegral
 {
@@ -52,21 +58,23 @@ struct TorqueIntegral
 
   // One cycle of dt seconds: updates integral, returns the torque to send.
   double step(
-    double & integral, double command, double measured, double effort_limit, double dt) const
+    double & integral, double command, double measured, double effort_limit, double dt,
+    double torque_gain = 1.0) const
   {
+    const double feedforward = command / torque_gain;
     if (!on())
     {
-      return command;
+      return std::max(-effort_limit, std::min(effort_limit, feedforward));
     }
     const double error = command - measured;
-    const double sum = command + integral;
+    const double sum = feedforward + integral;
     const bool saturated = std::abs(sum) >= effort_limit && sum * error > 0.0;
     if (!saturated)
     {
       integral += dt * (gain * error - leak * integral);
     }
     integral = std::max(-limit, std::min(limit, integral));
-    return std::max(-effort_limit, std::min(effort_limit, command + integral));
+    return std::max(-effort_limit, std::min(effort_limit, feedforward + integral));
   }
 };
 
@@ -90,6 +98,38 @@ inline TorqueIntegral parseTorqueIntegral(const std::string & text)
     throw std::invalid_argument("torque_integral '" + text + "': every number must be >= 0");
   }
   return t;
+}
+
+// Per joint, the fraction of what it is sent that each actuator delivers: n numbers in (0, 2],
+// space or comma separated; empty: 1 on every joint. Throws std::invalid_argument otherwise.
+inline std::vector<double> parseTorqueGains(const std::string & text, std::size_t n)
+{
+  std::vector<double> gains(n, 1.0);
+  std::string spaced = text;
+  std::replace(spaced.begin(), spaced.end(), ',', ' ');
+  if (spaced.find_first_not_of(" \t") == std::string::npos)
+  {
+    return gains;
+  }
+  std::istringstream in(spaced);
+  std::vector<double> parsed;
+  for (double g; in >> g;)
+  {
+    parsed.push_back(g);
+  }
+  if (!(in >> std::ws).eof() || parsed.size() != n)
+  {
+    throw std::invalid_argument(
+      "torque_gains '" + text + "': expected " + std::to_string(n) + " numbers, one per joint");
+  }
+  for (const double g : parsed)
+  {
+    if (!(g > 0.0 && g <= 2.0))
+    {
+      throw std::invalid_argument("torque_gains '" + text + "': each must be in (0, 2]");
+    }
+  }
+  return parsed;
 }
 
 }  // namespace kortex_driver

@@ -480,6 +480,24 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
       effort_command_signs_set_ = true;
     }
   }
+  try
+  {
+    torque_gains_ = parseTorqueGains(param("torque_gains"), actuator_count_);
+  }
+  catch (const std::exception & ex)
+  {
+    RCLCPP_ERROR(LOGGER, "Bad torque mode parameter: %s", ex.what());
+    return CallbackReturn::ERROR;
+  }
+  if (std::any_of(torque_gains_.begin(), torque_gains_.end(), [](double g) { return g != 1.0; }))
+  {
+    std::ostringstream gains;
+    for (const double g : torque_gains_)
+    {
+      gains << " " << g;
+    }
+    RCLCPP_INFO(LOGGER, "Torque gains (commands divided by them):%s", gains.str().c_str());
+  }
   effort_disagreement_cycles_.assign(actuator_count_, 0);
   torque_joints_.assign(actuator_count_, false);
   start_torque_joints_.assign(actuator_count_, false);
@@ -1463,7 +1481,8 @@ void KortexMultiInterfaceHardware::prepareCommands()
       // What the actuator leaves of the command, by the torque sensor, accumulated and added
       // (torque_integral.hpp); the command itself when off.
       const double sent = torque_integral_.step(
-        torque_integrals_[i], effort, arm_efforts_[i], effort_limits_[i], write_period_s_);
+        torque_integrals_[i], effort, arm_efforts_[i], effort_limits_[i], write_period_s_,
+        torque_gains_[i]);
       arm_efforts_sent_[i] = sent;
       base_command_.mutable_actuators(static_cast<int>(i))
         ->set_torque_joint(static_cast<float>(effort_command_signs_[i] * sent));
@@ -1615,12 +1634,16 @@ bool KortexMultiInterfaceHardware::enterTorqueMode()
     const double hold = std::clamp(
       REPORTED_TORQUE_SIGN * feedback_.actuators(static_cast<int>(i)).torque(), -effort_limits_[i],
       effort_limits_[i]);
+    // Corrected by the joint's torque gain as every later command is: uncorrected, the hold
+    // alone let joint_2 sag through TORQUE_HIGH_VELOCITY's shortfall during the startup check.
+    const double hold_sent =
+      std::clamp(hold / torque_gains_[i], -effort_limits_[i], effort_limits_[i]);
     base_command_.mutable_actuators(static_cast<int>(i))
-      ->set_torque_joint(static_cast<float>(effort_command_signs_[i] * hold));
+      ->set_torque_joint(static_cast<float>(effort_command_signs_[i] * hold_sent));
     arm_commands_efforts_[i] = hold;
     last_effort_commands_[i] = hold;
     torque_integrals_[i] = 0.0;
-    arm_efforts_sent_[i] = hold;
+    arm_efforts_sent_[i] = hold_sent;
     effort_disagreement_cycles_[i] = 0;
     names += (names.empty() ? "" : ", ") + arm_joint_names_[i] +
              (effort_command_signs_[i] > 0 ? " (+1)" : " (-1)");

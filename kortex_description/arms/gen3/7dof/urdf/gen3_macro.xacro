@@ -26,6 +26,7 @@
     effort_command_signs:=''
     torque_control_mode:=torque
     torque_integral:=''
+    torque_gains:=''
     joint_offsets:=${dict()}
     joint_compliance:=${dict()}
     use_fake_hardware:=false
@@ -63,6 +64,7 @@
       effort_command_signs="${effort_command_signs}"
       torque_control_mode="${torque_control_mode}"
       torque_integral="${torque_integral}"
+      torque_gains="${torque_gains}"
       joint_offsets="${joint_offsets}"
       joint_compliance="${joint_compliance}"
       gripper_joint_name="${gripper_joint_name}"

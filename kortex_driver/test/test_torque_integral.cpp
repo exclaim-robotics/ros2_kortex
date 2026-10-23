@@ -15,9 +15,11 @@
 #include <gtest/gtest.h>
 
 #include <stdexcept>
+#include <vector>
 
 #include "kortex_driver/torque_integral.hpp"
 
+using kortex_driver::parseTorqueGains;
 using kortex_driver::parseTorqueIntegral;
 using kortex_driver::TorqueIntegral;
 
@@ -122,4 +124,51 @@ TEST(TorqueIntegral, NoTimeNoChange)
   double integral = 1.5;
   EXPECT_DOUBLE_EQ(t.step(integral, 3.0, 0.0, 39.0, 0.0), 4.5);
   EXPECT_DOUBLE_EQ(integral, 1.5);
+}
+
+TEST(TorqueIntegral, GainDividesTheCommand)
+{
+  // Off: only the gain.
+  const TorqueIntegral off;
+  double integral = 0.0;
+  EXPECT_DOUBLE_EQ(off.step(integral, -17.2, 0.0, 39.0, DT, 0.86), -20.0);
+  EXPECT_DOUBLE_EQ(off.step(integral, 38.0, 0.0, 39.0, DT, 0.5), 39.0);  // still clamped
+}
+
+TEST(TorqueIntegral, GainLeavesTheIntegralOnlyTheRest)
+{
+  // joint_2's actuator: 0.86 of what it is sent. With that gain the first cycle already
+  // delivers the command, and the integral has nothing to do (but the one cycle before the
+  // sensor reads it, which leaks away).
+  const TorqueIntegral t{2.0, 0.1, 10.0};
+  double integral = 0.0, measured = 0.0;
+  for (int k = 0; k < 3000; k++)
+  {
+    measured = 0.86 * t.step(integral, -20.0, measured, 39.0, DT, 0.86);
+  }
+  EXPECT_NEAR(measured, -20.0, 1e-3);
+  EXPECT_NEAR(integral, 0.0, 1e-3);
+  // A gain a little off leaves the integral the difference.
+  integral = 0.0;
+  measured = 0.0;
+  for (int k = 0; k < 30000; k++)
+  {
+    measured = 0.80 * t.step(integral, -20.0, measured, 39.0, DT, 0.86);
+  }
+  const double left = -20.0 * (1.0 - 0.80 / 0.86) / (1.0 + (2.0 / 0.1) * 0.80);
+  EXPECT_NEAR(-20.0 - measured, left, 0.01);
+}
+
+TEST(TorqueIntegral, ParseGains)
+{
+  EXPECT_EQ(parseTorqueGains("", 6), std::vector<double>(6, 1.0));
+  EXPECT_EQ(parseTorqueGains(" ", 6), std::vector<double>(6, 1.0));
+  const std::vector<double> want{0.86, 0.86, 0.86, 1.0, 1.0, 1.0};
+  EXPECT_EQ(parseTorqueGains("0.86 0.86 0.86 1 1 1", 6), want);
+  EXPECT_EQ(parseTorqueGains("0.86,0.86,0.86,1,1,1", 6), want);
+  EXPECT_THROW(parseTorqueGains("0.86 0.86", 6), std::invalid_argument);
+  EXPECT_THROW(parseTorqueGains("1 1 1 1 1 1 1", 6), std::invalid_argument);
+  EXPECT_THROW(parseTorqueGains("1 1 1 1 1 0", 6), std::invalid_argument);
+  EXPECT_THROW(parseTorqueGains("1 1 1 1 1 2.5", 6), std::invalid_argument);
+  EXPECT_THROW(parseTorqueGains("1 1 1 1 1 x", 6), std::invalid_argument);
 }
