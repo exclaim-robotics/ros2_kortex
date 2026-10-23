@@ -301,7 +301,9 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
   // into torque mode: prepare_command_mode_switch refuses it.
   effort_limits_.assign(actuator_count_, std::numeric_limits<double>::infinity());
   last_effort_commands_.assign(actuator_count_, 0.0);
+  // Sized once here: export_state_interfaces hands out pointers into both.
   torque_integrals_.assign(actuator_count_, 0.0);
+  arm_efforts_sent_.assign(actuator_count_, std::numeric_limits<double>::quiet_NaN());
   joint_calibration_.assign(actuator_count_, JointCalibration());
   {
     std::size_t arm_index = 0;
@@ -524,6 +526,12 @@ KortexMultiInterfaceHardware::export_state_interfaces()
       arm_joint_names[i], hardware_interface::HW_IF_VELOCITY, &arm_velocities_[i]));
     state_interfaces.emplace_back(hardware_interface::StateInterface(
       arm_joint_names[i], hardware_interface::HW_IF_EFFORT, &arm_efforts_[i]));
+    // What torque mode really sends (the command plus the torque integral; NaN outside torque
+    // mode) and the integral alone, N*m, ROS sign: on /dynamic_joint_states, not /joint_states.
+    state_interfaces.emplace_back(
+      hardware_interface::StateInterface(arm_joint_names[i], "effort_sent", &arm_efforts_sent_[i]));
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+      arm_joint_names[i], "torque_integral", &torque_integrals_[i]));
   }
 
   // state interface which reports if robot is faulted
@@ -1431,6 +1439,7 @@ void KortexMultiInterfaceHardware::prepareCommands()
       KortexMathUtil::wrapDegreesFromZeroTo360(KortexMathUtil::toDeg(
         joint_calibration_[i].raw(arm_commands_positions_[i], arm_efforts_[i]))));
     cmd_vel_tmp_ = static_cast<float>(KortexMathUtil::toDeg(arm_commands_velocities_[i]));
+    arm_efforts_sent_[i] = std::numeric_limits<double>::quiet_NaN();
 
     if (use_effort_command_ && torque_joints_[i])
     {
@@ -1455,6 +1464,7 @@ void KortexMultiInterfaceHardware::prepareCommands()
       // (torque_integral.hpp); the command itself when off.
       const double sent = torque_integral_.step(
         torque_integrals_[i], effort, arm_efforts_[i], effort_limits_[i], write_period_s_);
+      arm_efforts_sent_[i] = sent;
       base_command_.mutable_actuators(static_cast<int>(i))
         ->set_torque_joint(static_cast<float>(effort_command_signs_[i] * sent));
     }
@@ -1610,6 +1620,7 @@ bool KortexMultiInterfaceHardware::enterTorqueMode()
     arm_commands_efforts_[i] = hold;
     last_effort_commands_[i] = hold;
     torque_integrals_[i] = 0.0;
+    arm_efforts_sent_[i] = hold;
     effort_disagreement_cycles_[i] = 0;
     names += (names.empty() ? "" : ", ") + arm_joint_names_[i] +
              (effort_command_signs_[i] > 0 ? " (+1)" : " (-1)");
@@ -1671,7 +1682,9 @@ void KortexMultiInterfaceHardware::leaveTorqueMode()
   setActuatorsControlMode(k_api::ActuatorConfig::ControlMode::POSITION, torque_joints_);
   use_effort_command_ = false;
   torque_joints_.assign(actuator_count_, false);
-  torque_integrals_.assign(actuator_count_, 0.0);
+  std::fill(torque_integrals_.begin(), torque_integrals_.end(), 0.0);  // in place: exported
+  std::fill(
+    arm_efforts_sent_.begin(), arm_efforts_sent_.end(), std::numeric_limits<double>::quiet_NaN());
 }
 
 void KortexMultiInterfaceHardware::sendJointCommands()

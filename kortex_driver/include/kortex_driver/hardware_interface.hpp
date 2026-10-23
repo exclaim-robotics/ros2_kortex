@@ -290,7 +290,8 @@ private:
   // (hardware param torque_integral, "K_I theta limit"; empty: off). See torque_integral.hpp.
   // Reset on entering and leaving torque mode; the startup sign check runs before it acts.
   TorqueIntegral torque_integral_;
-  std::vector<double> torque_integrals_;  // N*m, per joint
+  std::vector<double> torque_integrals_;  // N*m, per joint; exported as torque_integral
+  std::vector<double> arm_efforts_sent_;  // N*m, command + integral; exported as effort_sent
   double write_period_s_ = 0.001;         // s, the last write's period, at most 10 ms
   std::vector<double> last_effort_commands_;
 
