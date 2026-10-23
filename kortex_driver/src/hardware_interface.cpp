@@ -29,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -388,6 +389,23 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
     {
       feedback_timeout_ = std::chrono::milliseconds(std::stoi(param("feedback_timeout_ms")));
     }
+    if (!param("torque_control_mode").empty())
+    {
+      const std::string mode = param("torque_control_mode");
+      if (mode == "torque")
+      {
+        torque_control_mode_ = k_api::ActuatorConfig::ControlMode::TORQUE;
+      }
+      else if (mode == "torque_high_velocity")
+      {
+        torque_control_mode_ = k_api::ActuatorConfig::ControlMode::TORQUE_HIGH_VELOCITY;
+      }
+      else
+      {
+        throw std::invalid_argument(
+          "torque_control_mode '" + mode + "': expected torque or torque_high_velocity");
+      }
+    }
   }
   catch (const std::exception & ex)
   {
@@ -406,8 +424,9 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
   }
   RCLCPP_INFO(
     LOGGER,
-    "Torque mode: commands change by at most %.3f N*m per cycle; sign check %.2f N*m over %d "
-    "cycles, %d ms while holding at the switch",
+    "Torque mode (%s): commands change by at most %.3f N*m per cycle; sign check %.2f N*m over "
+    "%d cycles, %d ms while holding at the switch",
+    k_api::ActuatorConfig::ControlMode_Name(torque_control_mode_).c_str(),
     effort_command_max_step_, effort_check_tolerance_, effort_check_cycles_,
     effort_startup_check_ms_);
   if (feedback_timeout_.count() <= 0)
@@ -1592,7 +1611,7 @@ bool KortexMultiInterfaceHardware::enterTorqueMode()
     return false;
   }
   use_effort_command_ = true;
-  if (!setActuatorsControlMode(k_api::ActuatorConfig::ControlMode::TORQUE, torque_joints_))
+  if (!setActuatorsControlMode(torque_control_mode_, torque_joints_))
   {
     // Possibly half switched: put back whatever did switch.
     leaveTorqueMode();

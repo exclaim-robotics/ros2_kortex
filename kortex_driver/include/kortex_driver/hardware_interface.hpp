@@ -275,6 +275,15 @@ private:
   // the arm. last_effort_commands_ is what was actually sent (ROS convention, N*m).
   std::vector<double> effort_limits_;
   double effort_command_max_step_ = 0.5;
+
+  // Which of Kinova's torque modes the effort joints go to (hardware param torque_control_mode):
+  // TORQUE ("torque", the default) or TORQUE_HIGH_VELOCITY ("torque_high_velocity"). Through
+  // TORQUE, joint_6 looked like 4-10 kg m^2 and 14-36 Nm s/rad, both changing with frequency
+  // (torque-mode-id.py, 2026-10-23) - not the 0.22 kg m^2 rotor; the AIST paper on the Gen3
+  // (arXiv 2502.02967) says TORQUE feeds back the joint velocity and the high-velocity mode
+  // does not, but tracks torque worse. Commands, limits and the sign checks are the same in both.
+  k_api::ActuatorConfig::ControlMode torque_control_mode_ =
+    k_api::ActuatorConfig::ControlMode::TORQUE;
   std::vector<double> last_effort_commands_;
 
   // Startup sign check, for effort_startup_check_ms_ inside the mode switch, while the driver
