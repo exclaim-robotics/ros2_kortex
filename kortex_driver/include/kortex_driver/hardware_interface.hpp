@@ -44,6 +44,7 @@
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 
 #include "kortex_driver/joint_calibration.hpp"
+#include "kortex_driver/torque_integral.hpp"
 #include "kortex_driver/visibility_control.h"
 
 #include "ActuatorConfigClientRpc.h"
@@ -284,6 +285,13 @@ private:
   // does not, but tracks torque worse. Commands, limits and the sign checks are the same in both.
   k_api::ActuatorConfig::ControlMode torque_control_mode_ =
     k_api::ActuatorConfig::ControlMode::TORQUE;
+
+  // Leaky integral on each effort joint's torque error, added after the rate limit and clamp
+  // (hardware param torque_integral, "K_I theta limit"; empty: off). See torque_integral.hpp.
+  // Reset on entering and leaving torque mode; the startup sign check runs before it acts.
+  TorqueIntegral torque_integral_;
+  std::vector<double> torque_integrals_;  // N*m, per joint
+  double write_period_s_ = 0.001;         // s, the last write's period, at most 10 ms
   std::vector<double> last_effort_commands_;
 
   // Startup sign check, for effort_startup_check_ms_ inside the mode switch, while the driver

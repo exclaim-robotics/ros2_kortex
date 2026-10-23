@@ -106,6 +106,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_joint_calibration test/test_joint_calibration.cpp src/kortex_math_util.cpp)
   target_include_directories(test_joint_calibration PRIVATE include)
   ament_target_dependencies(test_joint_calibration hardware_interface)
+  # The torque integral, likewise.
+  ament_add_gtest(test_torque_integral test/test_torque_integral.cpp)
+  target_include_directories(test_torque_integral PRIVATE include)
 endif()
 
 ## EXPORTS

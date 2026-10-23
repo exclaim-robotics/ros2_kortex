@@ -25,6 +25,7 @@
     gripper_max_force:=100.0
     effort_command_signs:=''
     torque_control_mode:=torque
+    torque_integral:=''
     joint_offsets:=${dict()}
     joint_compliance:=${dict()}
     use_fake_hardware:=false

@@ -301,6 +301,7 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
   // into torque mode: prepare_command_mode_switch refuses it.
   effort_limits_.assign(actuator_count_, std::numeric_limits<double>::infinity());
   last_effort_commands_.assign(actuator_count_, 0.0);
+  torque_integrals_.assign(actuator_count_, 0.0);
   joint_calibration_.assign(actuator_count_, JointCalibration());
   {
     std::size_t arm_index = 0;
@@ -389,6 +390,7 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
     {
       feedback_timeout_ = std::chrono::milliseconds(std::stoi(param("feedback_timeout_ms")));
     }
+    torque_integral_ = parseTorqueIntegral(param("torque_integral"));
     if (!param("torque_control_mode").empty())
     {
       const std::string mode = param("torque_control_mode");
@@ -429,6 +431,14 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
     k_api::ActuatorConfig::ControlMode_Name(torque_control_mode_).c_str(),
     effort_command_max_step_, effort_check_tolerance_, effort_check_cycles_,
     effort_startup_check_ms_);
+  if (torque_integral_.on())
+  {
+    RCLCPP_INFO(
+      LOGGER,
+      "Torque integral on: %.3g/s of (command - measured torque), leaking at %.3g/s, at most "
+      "%.2f N*m",
+      torque_integral_.gain, torque_integral_.leak, torque_integral_.limit);
+  }
   if (feedback_timeout_.count() <= 0)
   {
     RCLCPP_ERROR(LOGGER, "feedback_timeout_ms must be > 0!");
@@ -1286,8 +1296,10 @@ void KortexMultiInterfaceHardware::readGripperPosition()
 }
 
 return_type KortexMultiInterfaceHardware::write(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+  const rclcpp::Time & /*time*/, const rclcpp::Duration & period)
 {
+  // The torque integral's step: a late cycle integrates no more than 10 ms.
+  write_period_s_ = std::clamp(period.seconds(), 0.0, 0.01);
   if (block_write)
   {
     cyclicRefresh(false);
@@ -1439,8 +1451,12 @@ void KortexMultiInterfaceHardware::prepareCommands()
         last_effort_commands_[i] + effort_command_max_step_);
       effort = std::clamp(effort, -effort_limits_[i], effort_limits_[i]);
       last_effort_commands_[i] = effort;
+      // What the actuator leaves of the command, by the torque sensor, accumulated and added
+      // (torque_integral.hpp); the command itself when off.
+      const double sent = torque_integral_.step(
+        torque_integrals_[i], effort, arm_efforts_[i], effort_limits_[i], write_period_s_);
       base_command_.mutable_actuators(static_cast<int>(i))
-        ->set_torque_joint(static_cast<float>(effort_command_signs_[i] * effort));
+        ->set_torque_joint(static_cast<float>(effort_command_signs_[i] * sent));
     }
     else if (use_velocity_command_)
     {
@@ -1593,6 +1609,7 @@ bool KortexMultiInterfaceHardware::enterTorqueMode()
       ->set_torque_joint(static_cast<float>(effort_command_signs_[i] * hold));
     arm_commands_efforts_[i] = hold;
     last_effort_commands_[i] = hold;
+    torque_integrals_[i] = 0.0;
     effort_disagreement_cycles_[i] = 0;
     names += (names.empty() ? "" : ", ") + arm_joint_names_[i] +
              (effort_command_signs_[i] > 0 ? " (+1)" : " (-1)");
@@ -1654,6 +1671,7 @@ void KortexMultiInterfaceHardware::leaveTorqueMode()
   setActuatorsControlMode(k_api::ActuatorConfig::ControlMode::POSITION, torque_joints_);
   use_effort_command_ = false;
   torque_joints_.assign(actuator_count_, false);
+  torque_integrals_.assign(actuator_count_, 0.0);
 }
 
 void KortexMultiInterfaceHardware::sendJointCommands()

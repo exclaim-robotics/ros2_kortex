@@ -39,6 +39,7 @@
     gripper_max_force:=100.0
     effort_command_signs:=''
     torque_control_mode:=torque
+    torque_integral:=''
     joint_offsets:=${dict()}
     joint_compliance:=${dict()}
     moveit_active:=false">
@@ -74,6 +75,7 @@
           <param name="gripper_max_force">${gripper_max_force}</param>
           <param name="effort_command_signs">${effort_command_signs}</param>
           <param name="torque_control_mode">${torque_control_mode}</param>
+          <param name="torque_integral">${torque_integral}</param>
         </xacro:unless>
       </hardware>
       <joint name="${prefix}joint_1">
