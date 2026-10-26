@@ -101,6 +101,11 @@ install(
 )
 
 if(BUILD_TESTING)
+  # The joint calibration transform, without the Kortex API or a robot.
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_joint_calibration test/test_joint_calibration.cpp src/kortex_math_util.cpp)
+  target_include_directories(test_joint_calibration PRIVATE include)
+  ament_target_dependencies(test_joint_calibration hardware_interface)
 endif()
 
 ## EXPORTS

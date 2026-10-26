@@ -43,6 +43,7 @@
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 
+#include "kortex_driver/joint_calibration.hpp"
 #include "kortex_driver/visibility_control.h"
 
 #include "ActuatorConfigClientRpc.h"
@@ -250,6 +251,12 @@ private:
   bool use_effort_command_;
   // Arm joint names in actuator order (info_.joints without the gripper).
   std::vector<std::string> arm_joint_names_;
+  // Per arm joint (actuator order): the kinematic calibration between the arm's raw angles and
+  // the ones ROS sees, from the joints' joint_offset / joint_compliance params. All zero (inert)
+  // when they are absent. See joint_calibration.hpp for what it does and does not cover.
+  std::vector<JointCalibration> joint_calibration_;
+  // The calibrated angle of actuator i in feedback, wrapped to [-pi, pi] as before (rad).
+  double calibratedPosition(const k_api::BaseCyclic::Feedback & feedback, std::size_t i) const;
   // Arm joints (actuator order) whose effort interface the starting (running) controller claims.
   std::vector<bool> start_torque_joints_;
   std::vector<bool> torque_joints_;

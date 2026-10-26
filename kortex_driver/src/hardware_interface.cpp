@@ -300,6 +300,7 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
   // into torque mode: prepare_command_mode_switch refuses it.
   effort_limits_.assign(actuator_count_, std::numeric_limits<double>::infinity());
   last_effort_commands_.assign(actuator_count_, 0.0);
+  joint_calibration_.assign(actuator_count_, JointCalibration());
   {
     std::size_t arm_index = 0;
     for (const auto & joint : info_.joints)
@@ -319,8 +320,41 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
       RCLCPP_INFO(
         LOGGER, "Torque mode limit for '%s': %.2f N*m", joint.name.c_str(),
         effort_limits_[arm_index]);
+      // Kinematic calibration (joint_calibration.hpp): readings and position commands only,
+      // never the actuators' own zero. Inert unless the joint carries the params.
+      try
+      {
+        joint_calibration_[arm_index] = parseJointCalibration(joint.parameters);
+      }
+      catch (const std::exception & ex)
+      {
+        RCLCPP_ERROR(LOGGER, "Joint '%s': %s", joint.name.c_str(), ex.what());
+        return CallbackReturn::ERROR;
+      }
+      if (joint_calibration_[arm_index].active())
+      {
+        RCLCPP_INFO(
+          LOGGER,
+          "Joint calibration for '%s': offset %+.6f rad (%+.3f deg), compliance %.6g rad/(N*m)",
+          joint.name.c_str(), joint_calibration_[arm_index].offset,
+          KortexMathUtil::toDeg(joint_calibration_[arm_index].offset),
+          joint_calibration_[arm_index].compliance);
+      }
       ++arm_index;
     }
+  }
+  if (std::none_of(
+        joint_calibration_.begin(), joint_calibration_.end(),
+        [](const JointCalibration & c) { return c.active(); }))
+  {
+    RCLCPP_INFO(LOGGER, "Joint calibration: none (raw joint angles)");
+  }
+  else
+  {
+    RCLCPP_WARN(
+      LOGGER,
+      "Joint calibration applied to positions and position commands. Twist mode (the arm's own "
+      "Cartesian control) is NOT corrected; the arm's joint limits stay raw.");
   }
   // Optional torque mode parameters; the defaults are in the header.
   const auto param = [this](const std::string & name) -> std::string
@@ -958,8 +992,7 @@ CallbackReturn KortexMultiInterfaceHardware::on_activate(
   {
     if (std::isnan(arm_positions_[i]))
     {
-      arm_positions_[i] = KortexMathUtil::wrapRadiansFromMinusPiToPi(
-        KortexMathUtil::toRad(base_feedback.actuators(i).position()));  // rad
+      arm_positions_[i] = calibratedPosition(base_feedback, i);  // rad
     }
     if (std::isnan(arm_velocities_[i]))
     {
@@ -971,8 +1004,7 @@ CallbackReturn KortexMultiInterfaceHardware::on_activate(
     }
     if (std::isnan(arm_commands_positions_[i]))
     {
-      arm_commands_positions_[i] = KortexMathUtil::wrapRadiansFromMinusPiToPi(
-        KortexMathUtil::toRad(base_feedback.actuators(i).position()));  // rad
+      arm_commands_positions_[i] = calibratedPosition(base_feedback, i);  // rad
     }
     if (std::isnan(arm_commands_velocities_[i]))
     {
@@ -1128,11 +1160,8 @@ return_type KortexMultiInterfaceHardware::read(
     arm_efforts_[i] = REPORTED_TORQUE_SIGN * feedback_.actuators(i).torque();  // N*m, ROS sign
     // read velocity
     arm_velocities_[i] = KortexMathUtil::toRad(feedback_.actuators(i).velocity());  // rad/sec
-    // read position
-    num_turns_tmp_ = 0;
-    arm_positions_[i] = KortexMathUtil::wrapRadiansFromMinusPiToPi(
-      KortexMathUtil::toRad(feedback_.actuators(i).position()),
-      num_turns_tmp_);  // rad
+    // read position, calibrated (joint_calibration_; the raw angle when there is none)
+    arm_positions_[i] = calibratedPosition(feedback_, i);  // rad
 
     in_fault_ += (feedback_.actuators(i).fault_bank_a() + feedback_.actuators(i).fault_bank_b());
 
@@ -1215,6 +1244,15 @@ void KortexMultiInterfaceHardware::logBankChanges()
     }
   }
   logged_banks_ = banks;
+}
+
+double KortexMultiInterfaceHardware::calibratedPosition(
+  const k_api::BaseCyclic::Feedback & feedback, std::size_t i) const
+{
+  const auto & actuator = feedback.actuators(static_cast<int>(i));
+  const double raw = KortexMathUtil::toRad(actuator.position());  // rad
+  const double effort = REPORTED_TORQUE_SIGN * actuator.torque();  // N*m, ROS sign
+  return KortexMathUtil::wrapRadiansFromMinusPiToPi(joint_calibration_[i].calibrated(raw, effort));
 }
 
 void KortexMultiInterfaceHardware::readGripperPosition()
@@ -1355,8 +1393,12 @@ void KortexMultiInterfaceHardware::prepareCommands()
   for (size_t i = 0; i < actuator_count_; i++)
   {
     // set command per joint
+    // The command is in calibrated angles; the arm takes raw ones. The compliance term uses the
+    // torque the joint carries now (the last read), so a joint holding a load is commanded where
+    // its encoder will read once deflected.
     cmd_degrees_tmp_ = static_cast<float>(
-      KortexMathUtil::wrapDegreesFromZeroTo360(KortexMathUtil::toDeg(arm_commands_positions_[i])));
+      KortexMathUtil::wrapDegreesFromZeroTo360(KortexMathUtil::toDeg(
+        joint_calibration_[i].raw(arm_commands_positions_[i], arm_efforts_[i]))));
     cmd_vel_tmp_ = static_cast<float>(KortexMathUtil::toDeg(arm_commands_velocities_[i]));
 
     if (use_effort_command_ && torque_joints_[i])
@@ -1453,10 +1495,9 @@ void KortexMultiInterfaceHardware::holdMeasuredPosition()
   acceptBlockingFeedback();
   for (std::size_t i = 0; i < actuator_count_; i++)
   {
-    const float measured = feedback_.actuators(static_cast<int>(i)).position();  // deg
+    const float measured = feedback_.actuators(static_cast<int>(i)).position();  // deg, raw
     base_command_.mutable_actuators(static_cast<int>(i))->set_position(measured);
-    arm_commands_positions_[i] =
-      KortexMathUtil::wrapRadiansFromMinusPiToPi(KortexMathUtil::toRad(measured));
+    arm_commands_positions_[i] = calibratedPosition(feedback_, i);
   }
 }
 
