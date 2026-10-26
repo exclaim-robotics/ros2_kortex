@@ -13,6 +13,18 @@
        rackthor_description/config/arm_inertials.yaml). Left undefined, the
        CAD values below stand, as upstream. -->
   <xacro:property name="kortex_inertials" default=""/>
+  <!-- Per-joint origins from outside (the arm's kinematic calibration):
+       define kortex_joint_origins before load_robot as {joint: {xyz: [x, y, z]
+       (m), rpy: [r, p, y] (rad)}}, unprefixed joint names, each the joint's
+       whole origin (parent link -> joint frame), replacing the nominal one
+       below. Joints left out keep theirs. Left undefined, all nominal, as
+       upstream. (rackthor: arm.joint_origins in the robot's
+       payload_calibration.yaml, from the omnicalibrator's link-geometry fit.) -->
+  <xacro:property name="kortex_joint_origins" default=""/>
+  <xacro:macro name="kortex_origin" params="joint xyz rpy">
+    <xacro:property name="o" value="${dict() if kortex_joint_origins == '' else (kortex_joint_origins.get(joint) or dict())}"/>
+    <origin xyz="${' '.join(map(str, o['xyz'])) if 'xyz' in o else xyz}" rpy="${' '.join(map(str, o['rpy'])) if 'rpy' in o else rpy}" />
+  </xacro:macro>
   <xacro:macro name="kortex_inertial" params="link xyz mass ixx ixy ixz iyy iyz izz">
     <xacro:property name="cad" value="${kortex_inertials == ''}"/>
     <xacro:property name="o" value="${dict() if cad else kortex_inertials[link]}"/>
@@ -180,7 +192,7 @@
       </collision>
     </link>
     <joint name="${prefix}joint_2" type="revolute">
-      <origin xyz="0 0.005375 -0.12838" rpy="1.5708 0.0 0.0" />
+      <xacro:kortex_origin joint="joint_2" xyz="0 0.005375 -0.12838" rpy="1.5708 0.0 0.0"/>
       <parent link="${prefix}shoulder_link" />
       <child link="${prefix}bicep_link" />
       <axis xyz="0 0 1" />
@@ -206,7 +218,7 @@
       </collision>
     </link>
     <joint name="${prefix}joint_3" type="revolute">
-      <origin xyz="0 -0.41 0" rpy="3.1416 0 0" />
+      <xacro:kortex_origin joint="joint_3" xyz="0 -0.41 0" rpy="3.1416 0 0"/>
       <parent link="${prefix}bicep_link" />
       <child link="${prefix}forearm_link" />
       <axis xyz="0 0 1" />
@@ -233,7 +245,7 @@
     </link>
     <xacro:if value="${use_external_cable}">
       <joint name="${prefix}joint_4" type="revolute">
-        <origin xyz="0 0.20843 -0.006375" rpy="1.5708 0.0 0.0" />
+        <xacro:kortex_origin joint="joint_4" xyz="0 0.20843 -0.006375" rpy="1.5708 0.0 0.0"/>
         <parent link="${prefix}forearm_link" />
         <child link="${prefix}spherical_wrist_1_link" />
         <axis xyz="0 0 1" />
@@ -242,7 +254,7 @@
     </xacro:if>
     <xacro:unless value="${use_external_cable}">
       <joint name="${prefix}joint_4" type="continuous">
-        <origin xyz="0 0.20843 -0.006375" rpy="1.5708 0.0 0.0" />
+        <xacro:kortex_origin joint="joint_4" xyz="0 0.20843 -0.006375" rpy="1.5708 0.0 0.0"/>
         <parent link="${prefix}forearm_link" />
         <child link="${prefix}spherical_wrist_1_link" />
         <axis xyz="0 0 1" />
@@ -268,7 +280,7 @@
       </collision>
     </link>
     <joint name="${prefix}joint_5" type="revolute">
-      <origin xyz="0 -0.00017505 -0.10593" rpy="-1.5708 0.0 0.0" />
+      <xacro:kortex_origin joint="joint_5" xyz="0 -0.00017505 -0.10593" rpy="-1.5708 0.0 0.0"/>
       <parent link="${prefix}spherical_wrist_1_link" />
       <child link="${prefix}spherical_wrist_2_link" />
       <axis xyz="0 0 1" />
@@ -317,7 +329,7 @@
     </xacro:unless>
     <xacro:if value="${use_external_cable}">
       <joint name="${prefix}joint_6" type="revolute">
-        <origin xyz="0 0.10593 -0.00017505" rpy="1.5708 0.0 0.0" />
+        <xacro:kortex_origin joint="joint_6" xyz="0 0.10593 -0.00017505" rpy="1.5708 0.0 0.0"/>
         <parent link="${prefix}spherical_wrist_2_link" />
         <child link="${prefix}bracelet_link" />
         <axis xyz="0 0 1" />
@@ -326,7 +338,7 @@
     </xacro:if>
     <xacro:unless value="${use_external_cable}">
       <joint name="${prefix}joint_6" type="continuous">
-        <origin xyz="0 0.10593 -0.00017505" rpy="1.5708 0.0 0.0" />
+        <xacro:kortex_origin joint="joint_6" xyz="0 0.10593 -0.00017505" rpy="1.5708 0.0 0.0"/>
         <parent link="${prefix}spherical_wrist_2_link" />
         <child link="${prefix}bracelet_link" />
         <axis xyz="0 0 1" />
