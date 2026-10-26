@@ -43,6 +43,8 @@
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 
+#include "kortex_driver/current_torque_config.hpp"
+#include "kortex_driver/current_torque_loop.hpp"
 #include "kortex_driver/joint_calibration.hpp"
 #include "kortex_driver/visibility_control.h"
 
@@ -290,6 +292,19 @@ private:
   int effort_startup_check_ms_ = 150;
   std::vector<int> effort_disagreement_cycles_;
 
+  // torque_control: current. The effort controller's joints go to the actuators' CURRENT mode
+  // instead of TORQUE, under the driver's own torque loop on the joint torque sensor, one per arm
+  // joint (current_torque_loop.hpp), configured by the YAML file current_torque_config. Entering
+  // it adds a check of torque_constant and of the current's sign against the gravity load the
+  // arm holds (currentTorqueConstantsAgree); a joint faster than its speed_limit ends it.
+  bool current_torque_control_ = false;
+  CurrentTorqueConfig current_torque_config_;
+  std::vector<CurrentTorqueLoop> current_loops_;
+  double write_period_ = CurrentTorqueLoop::PERIOD;  // s, the last write()'s
+  bool period_warned_ = false;
+  bool currentTorqueConstantsAgree();
+  bool overSpeed();
+
   // first pass flag
   bool first_pass_;
 
@@ -326,9 +341,9 @@ private:
   // VELOCITY or TORQUE). Returns false (and logs) if the robot refused it for any actuator.
   bool setActuatorsControlMode(
     k_api::ActuatorConfig::ControlMode control_mode, const std::vector<bool> & joints = {});
-  // Put the torque_joints_ actuators into TORQUE mode without moving the arm, then run the
-  // startup sign check (see the definition). On failure the arm is left in POSITION mode,
-  // holding.
+  // Put the torque_joints_ actuators into TORQUE mode (CURRENT with torque_control: current,
+  // after its torque constant check) without moving the arm, then run the startup sign check
+  // (see the definition). On failure the arm is left in POSITION mode, holding.
   bool enterTorqueMode();
   // Put the torque_joints_ actuators back into POSITION mode holding where they are now.
   void leaveTorqueMode();

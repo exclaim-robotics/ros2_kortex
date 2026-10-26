@@ -1,0 +1,51 @@
+# torque_control: current - the driver's own torque loop through the actuators' CURRENT mode
+# (current_torque_loop.hpp), read once at startup from the file current_torque_config names.
+# Per joint, joint_1 .. joint_6 in actuator order, every 1 kHz cycle:
+#
+#   e       = tau_desired - tau_measured                     (the joint torque sensor)
+#   current = (tau_desired + lambda * H(e) + I + friction) / (torque_constant * gear_ratio)
+#
+# after the AIST paper on the Gen3 (arXiv 2502.02967) and its mc_kortex. H is the paper's fixed
+# filter at 1 kHz (unity gain at DC). A list gives one value per joint, a single value all.
+#
+# FIRST SETTINGS, for bring-up on the arm, joint by joint: the paper's lambda, the Gen3's torque
+# constants, friction compensation and the integral off. Overcompensated friction pushes a joint
+# along by itself: raise each term from 0, never from the paper's values.
+
+# Gain on the filtered torque error (the paper's and mc_kortex's sample: 7).
+lambda: [7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
+
+# N*m/A, the motor's, before the gear: 0.11 on the big actuators, 0.076 on the small (mc_kortex);
+# on the 6-DoF arm joints 1-3 are big, 4-6 small. Checked at every switch against the current the
+# arm's own position loop draws to hold (safety.kt_check_*).
+torque_constant: [0.11, 0.11, 0.11, 0.076, 0.076, 0.076]
+gear_ratio: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
+
+# A, both ways: the URDF effort limits (39 N*m, 9 N*m) through the constants above, plus 25% for
+# the loop's correction on top of the command.
+current_limit: [4.4, 4.4, 4.4, 1.5, 1.5, 1.5]
+
+friction:
+  velocity_threshold: 0.035   # rad/s (2 deg/s): slower is quasi-static
+  error_threshold: 0.5        # N*m: at rest, stiction pushes the way a torque error this large points
+  # The paper's arm, for reference (7-DoF, its big joints 1-4, small 5-7):
+  #   coulomb = stiction 2.15 big, 1.60 small N*m; viscous 2.00 big, 1.36 small N*m s/rad.
+  coulomb: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  viscous: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  stiction: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# A slow leaky integral of the torque error: dI/dt = gain * e - I / leak, |I| <= bound.
+integral:
+  gain: 0.0                   # 1/s; 0: off
+  leak: 0.1                   # s
+  # N*m; default (absent) 5% of each joint's URDF effort limit, as mc_kortex.
+  # bound: [1.95, 1.95, 1.95, 0.45, 0.45, 0.45]
+
+safety:
+  # rad/s: a joint under the loop faster than this ends CURRENT mode; the arm holds. 0: off.
+  speed_limit: 1.0
+  # At every switch, still holding in POSITION mode: on each joint carrying more than
+  # kt_check_min_torque, the torque its measured current makes must agree in sign with the
+  # measured torque and be within kt_check_ratio of it, or the switch is refused.
+  kt_check_ratio: 1.6
+  kt_check_min_torque: 3.0    # N*m

@@ -1,0 +1,148 @@
+// Copyright (c) 2026 Exclaim Robotics
+// Licensed under the Apache License, Version 2.0 (see LICENSE).
+//
+// The driver's own joint torque loop for an actuator in CURRENT mode (torque_control: current).
+//
+// Kinova's TORQUE mode closes its own torque loop in the actuator, and through it a Gen3 joint
+// moves like a heavy, strongly damped one: joint_6 looked 4-10 kg m^2 and 14-36 N*m s/rad against
+// its rotor's 0.22 kg m^2 (rackthor torque-mode-id.py, 2026-10-23). CURRENT mode has no such
+// loop: the motor current is the command. This loop puts one back, on the joint torque sensor,
+// after the AIST paper on the Gen3 (arXiv 2502.02967) and its mc_kortex
+// (KinovaRobot::currentTorqueControlLaw). Per joint, each 1 kHz cycle:
+//
+//   e       = tau_desired - tau_measured                     the joint torque sensor, ROS sign
+//   current = (tau_desired + lambda * H(e) + I + F) / (Kt * G)
+//
+// tau_desired is the feedforward: the torque, as a motor current through the motor's torque
+// constant Kt and the gear ratio G. H is the paper's fixed discrete filter on the torque error
+// (Kinova's high-velocity transfer function, unity gain at DC, at 1 kHz), times lambda: the
+// feedback that makes the joint torque follow the command where friction and Kt's errors keep
+// the feedforward from it. I is a slow leaky integral of e, for what is left at rest. F is
+// friction compensation:
+//
+//   |v| >= velocity_threshold    coulomb * sign(v) + viscous * v
+//   |e| >= error_threshold       stiction * sign(e)      (slower: quasi-static)
+//   otherwise                    0
+//
+// The paper switches stiction on the desired acceleration; the driver is given torques only, so
+// at rest stiction pushes the way the torque error points. Its rotor inertia term needs the
+// desired acceleration too and is left out.
+//
+// Overcompensated friction pushes a joint along by itself: every friction term starts at 0 and
+// is raised on the arm, joint by joint. The current is clamped to current_limit.
+
+#ifndef KORTEX_DRIVER__CURRENT_TORQUE_LOOP_HPP_
+#define KORTEX_DRIVER__CURRENT_TORQUE_LOOP_HPP_
+
+#include <algorithm>
+#include <cmath>
+
+namespace kortex_driver
+{
+
+struct CurrentTorqueJointConfig
+{
+  double lambda = 0.0;           // gain on the filtered torque error
+  double torque_constant = 0.0;  // N*m/A, the motor's (before the gear)
+  double gear_ratio = 100.0;
+  double current_limit = 0.0;    // A, both ways
+  double coulomb = 0.0;          // N*m
+  double viscous = 0.0;          // N*m s/rad
+  double stiction = 0.0;         // N*m
+  double velocity_threshold = 0.035;  // rad/s: slower is quasi-static
+  double error_threshold = 0.5;       // N*m: the torque error that brings stiction in at rest
+  double integral_gain = 0.0;         // 1/s: d I/dt = integral_gain * e - I / integral_leak
+  double integral_leak = 0.1;         // s
+  double integral_bound = 0.0;        // N*m, both ways
+};
+
+class CurrentTorqueLoop
+{
+public:
+  // The filter H(z) = (B0 + B1 z^-1 + B2 z^-2) / (1 + A1 z^-1 + A2 z^-2), at PERIOD.
+  static constexpr double B0 = 0.02017482;
+  static constexpr double B1 = -0.03697504;
+  static constexpr double B2 = 0.01691718;
+  static constexpr double A1 = -1.975063;
+  static constexpr double A2 = 0.9751799;
+  static constexpr double PERIOD = 0.001;  // s
+
+  explicit CurrentTorqueLoop(const CurrentTorqueJointConfig & config = {}) : config_(config) {}
+
+  const CurrentTorqueJointConfig & config() const { return config_; }
+
+  // Forget the filter's and the integral's history: at the switch into CURRENT mode.
+  void reset()
+  {
+    e1_ = e2_ = h1_ = h2_ = 0.0;
+    integral_ = 0.0;
+    error_ = filtered_ = friction_ = current_ = 0.0;
+  }
+
+  // The motor current (A, ROS sign) for one cycle of dt seconds. The filter assumes PERIOD.
+  double update(double tau_desired, double tau_measured, double velocity, double dt)
+  {
+    const auto & c = config_;
+    error_ = tau_desired - tau_measured;
+    filtered_ = B0 * error_ + B1 * e1_ + B2 * e2_ - A1 * h1_ - A2 * h2_;
+    e2_ = e1_;
+    e1_ = error_;
+    h2_ = h1_;
+    h1_ = filtered_;
+
+    if (dt > 0.0 && c.integral_leak > 0.0)
+    {
+      // Exact for a constant e over the step: I relaxes to integral_gain * leak * e.
+      const double a = std::exp(-dt / c.integral_leak);
+      integral_ = a * integral_ + (1.0 - a) * c.integral_gain * c.integral_leak * error_;
+      integral_ = clamp(integral_, c.integral_bound);
+    }
+
+    if (std::abs(velocity) >= c.velocity_threshold)
+    {
+      friction_ = c.coulomb * sign(velocity) + c.viscous * velocity;
+    }
+    else if (std::abs(error_) >= c.error_threshold)
+    {
+      friction_ = c.stiction * sign(error_);
+    }
+    else
+    {
+      friction_ = 0.0;
+    }
+
+    const double torque = tau_desired + c.lambda * filtered_ + integral_ + friction_;
+    current_ = clamp(currentFor(torque), c.current_limit);
+    return current_;
+  }
+
+  // The current that gives this joint torque with nothing else in the way, and the reverse.
+  double currentFor(double torque) const
+  {
+    return torque / (config_.torque_constant * config_.gear_ratio);
+  }
+  double torqueFor(double current) const
+  {
+    return current * config_.torque_constant * config_.gear_ratio;
+  }
+
+  // The last update's terms, for logging and tuning.
+  double error() const { return error_; }
+  double filtered() const { return filtered_; }
+  double integral() const { return integral_; }
+  double friction() const { return friction_; }
+  double current() const { return current_; }
+
+private:
+  static double sign(double x) { return (x > 0.0) - (x < 0.0); }
+  static double clamp(double x, double limit) { return std::max(-limit, std::min(x, limit)); }
+
+  CurrentTorqueJointConfig config_;
+  double e1_ = 0.0, e2_ = 0.0, h1_ = 0.0, h2_ = 0.0;
+  double integral_ = 0.0;
+  double error_ = 0.0, filtered_ = 0.0, friction_ = 0.0, current_ = 0.0;
+};
+
+}  // namespace kortex_driver
+
+#endif  // KORTEX_DRIVER__CURRENT_TORQUE_LOOP_HPP_

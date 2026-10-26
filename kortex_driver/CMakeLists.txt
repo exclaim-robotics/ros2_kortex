@@ -25,6 +25,8 @@ find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(kortex_api REQUIRED)
+# torque_control: current's settings file
+find_package(yaml-cpp REQUIRED)
 
 # This is the second, independent arch gate in ros2_kortex - kortex_api has
 # its own - and it pins a DIFFERENT API version, 2.5.0 against kortex_api's
@@ -73,7 +75,7 @@ add_library(
   src/hardware_interface.cpp
   src/kortex_math_util.cpp
 )
-target_link_libraries(${PROJECT_NAME} KortexApiCpp)
+target_link_libraries(${PROJECT_NAME} KortexApiCpp yaml-cpp)
 target_include_directories(
   ${PROJECT_NAME}
   PRIVATE
@@ -99,6 +101,10 @@ install(
   DIRECTORY include/
   DESTINATION include
 )
+install(
+  DIRECTORY config/
+  DESTINATION share/${PROJECT_NAME}/config
+)
 
 if(BUILD_TESTING)
   # The joint calibration transform, without the Kortex API or a robot.
@@ -106,6 +112,12 @@ if(BUILD_TESTING)
   ament_add_gtest(test_joint_calibration test/test_joint_calibration.cpp src/kortex_math_util.cpp)
   target_include_directories(test_joint_calibration PRIVATE include)
   ament_target_dependencies(test_joint_calibration hardware_interface)
+  # torque_control: current's torque loop and its settings file, without the Kortex API.
+  ament_add_gtest(test_current_torque_loop test/test_current_torque_loop.cpp)
+  target_include_directories(test_current_torque_loop PRIVATE include)
+  target_link_libraries(test_current_torque_loop yaml-cpp)
+  target_compile_definitions(test_current_torque_loop PRIVATE
+    KORTEX_DRIVER_CONFIG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config")
 endif()
 
 ## EXPORTS

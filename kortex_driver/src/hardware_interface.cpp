@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -410,6 +411,62 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
     "cycles, %d ms while holding at the switch",
     effort_command_max_step_, effort_check_tolerance_, effort_check_cycles_,
     effort_startup_check_ms_);
+
+  // torque_control: kinova (Kinova's TORQUE mode, the default) or current (CURRENT mode under
+  // the driver's own torque loop, configured by the YAML file current_torque_config).
+  {
+    const std::string torque_control = param("torque_control");
+    if (torque_control == "current")
+    {
+      const std::string path = param("current_torque_config");
+      std::ifstream file(path);
+      if (path.empty() || !file)
+      {
+        RCLCPP_ERROR(
+          LOGGER, "torque_control is current but current_torque_config '%s' cannot be read",
+          path.c_str());
+        return CallbackReturn::ERROR;
+      }
+      std::stringstream text;
+      text << file.rdbuf();
+      try
+      {
+        // effort_limits_ is in actuator order, the arm joints only (see above).
+        current_torque_config_ = parseCurrentTorqueConfig(text.str(), effort_limits_);
+      }
+      catch (const std::exception & ex)
+      {
+        RCLCPP_ERROR(LOGGER, "current_torque_config '%s': %s", path.c_str(), ex.what());
+        return CallbackReturn::ERROR;
+      }
+      current_loops_.clear();
+      std::ostringstream summary;
+      for (std::size_t i = 0; i < actuator_count_; i++)
+      {
+        const auto & c = current_torque_config_.joints[i];
+        current_loops_.emplace_back(c);
+        summary << "\n  " << arm_joint_names_[i] << ": lambda " << c.lambda << ", Kt "
+                << c.torque_constant << " N*m/A x " << c.gear_ratio << ", limit "
+                << c.current_limit << " A; friction " << c.coulomb << " + " << c.viscous
+                << " v, stiction " << c.stiction << "; integral " << c.integral_gain << "/s, "
+                << c.integral_leak << " s, +-" << c.integral_bound << " N*m";
+      }
+      current_torque_control_ = true;
+      RCLCPP_INFO(
+        LOGGER,
+        "torque_control: current, from %s - effort commands through CURRENT mode under the "
+        "driver's torque loop; speed limit %.2f rad/s; torque constant check within %.2fx above "
+        "%.1f N*m:%s",
+        path.c_str(), current_torque_config_.speed_limit, current_torque_config_.kt_check_ratio,
+        current_torque_config_.kt_check_min_torque, summary.str().c_str());
+    }
+    else if (!torque_control.empty() && torque_control != "kinova")
+    {
+      RCLCPP_ERROR(
+        LOGGER, "torque_control must be kinova or current; got '%s'", torque_control.c_str());
+      return CallbackReturn::ERROR;
+    }
+  }
   if (feedback_timeout_.count() <= 0)
   {
     RCLCPP_ERROR(LOGGER, "feedback_timeout_ms must be > 0!");
@@ -1267,8 +1324,9 @@ void KortexMultiInterfaceHardware::readGripperPosition()
 }
 
 return_type KortexMultiInterfaceHardware::write(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+  const rclcpp::Time & /*time*/, const rclcpp::Duration & period)
 {
+  write_period_ = period.seconds();
   if (block_write)
   {
     cyclicRefresh(false);
@@ -1358,6 +1416,27 @@ return_type KortexMultiInterfaceHardware::write(
 
       if (joint_based_controller_running_)
       {
+        if (use_effort_command_ && current_torque_control_)
+        {
+          if (!period_warned_ && std::abs(write_period_ - CurrentTorqueLoop::PERIOD) > 2e-4)
+          {
+            RCLCPP_WARN(
+              LOGGER,
+              "CURRENT mode's torque loop filter is made for %.0f Hz; write() runs every %.2f ms",
+              1.0 / CurrentTorqueLoop::PERIOD, write_period_ * 1e3);
+            period_warned_ = true;
+          }
+          if (overSpeed())
+          {
+            // As after a fault: the effort controller stays active, its commands ignored until
+            // it is re-activated.
+            leaveTorqueMode();
+            RCLCPP_ERROR(
+              LOGGER,
+              "Left CURRENT mode: the arm holds position. Re-activate the effort controller to "
+              "resume.");
+          }
+        }
         // send commands to the joints
         sendJointCommands();
       }
@@ -1422,6 +1501,17 @@ void KortexMultiInterfaceHardware::prepareCommands()
       last_effort_commands_[i] = effort;
       base_command_.mutable_actuators(static_cast<int>(i))
         ->set_torque_joint(static_cast<float>(effort_command_signs_[i] * effort));
+      if (current_torque_control_)
+      {
+        // CURRENT mode: the same torque, as a motor current through the driver's torque loop
+        // (current_torque_loop.hpp). The current takes effort_command_signs_ like the torque;
+        // the switch's check (currentTorqueConstantsAgree) is what confirms it per joint.
+        const double current = current_loops_[i].update(
+          effort, REPORTED_TORQUE_SIGN * feedback_.actuators(static_cast<int>(i)).torque(),
+          arm_velocities_[i], write_period_);
+        base_command_.mutable_actuators(static_cast<int>(i))
+          ->set_current_motor(static_cast<float>(effort_command_signs_[i] * current));
+      }
     }
     else if (use_velocity_command_)
     {
@@ -1560,12 +1650,26 @@ bool KortexMultiInterfaceHardware::enterTorqueMode()
   // picks up that torque the moment it changes mode, so the arm holds until the controller's
   // first command, which the rate limit then ramps in.
   holdMeasuredPosition();
+  if (current_torque_control_ && !currentTorqueConstantsAgree())
+  {
+    RCLCPP_ERROR(LOGGER, "CURRENT mode refused: the arm stays in POSITION mode.");
+    torque_joints_.assign(actuator_count_, false);
+    return false;
+  }
   std::string names;
   for (std::size_t i = 0; i < actuator_count_; i++)
   {
     if (!torque_joints_[i])
     {
       continue;
+    }
+    if (current_torque_control_)
+    {
+      // CURRENT mode picks up the current the arm's own position loop draws to hold right now,
+      // and the loop starts from nothing.
+      base_command_.mutable_actuators(static_cast<int>(i))
+        ->set_current_motor(feedback_.actuators(static_cast<int>(i)).current_motor());
+      current_loops_[i].reset();
     }
     const double hold = std::clamp(
       REPORTED_TORQUE_SIGN * feedback_.actuators(static_cast<int>(i)).torque(), -effort_limits_[i],
@@ -1578,7 +1682,9 @@ bool KortexMultiInterfaceHardware::enterTorqueMode()
     names += (names.empty() ? "" : ", ") + arm_joint_names_[i] +
              (effort_command_signs_[i] > 0 ? " (+1)" : " (-1)");
   }
-  RCLCPP_INFO(LOGGER, "Entering torque mode on [%s]", names.c_str());
+  RCLCPP_INFO(
+    LOGGER, "Entering %s mode on [%s]", current_torque_control_ ? "CURRENT" : "TORQUE",
+    names.c_str());
   if (!effort_command_signs_set_)
   {
     RCLCPP_WARN(
@@ -1592,7 +1698,10 @@ bool KortexMultiInterfaceHardware::enterTorqueMode()
     return false;
   }
   use_effort_command_ = true;
-  if (!setActuatorsControlMode(k_api::ActuatorConfig::ControlMode::TORQUE, torque_joints_))
+  if (!setActuatorsControlMode(
+        current_torque_control_ ? k_api::ActuatorConfig::ControlMode::CURRENT
+                                : k_api::ActuatorConfig::ControlMode::TORQUE,
+        torque_joints_))
   {
     // Possibly half switched: put back whatever did switch.
     leaveTorqueMode();
@@ -1635,6 +1744,74 @@ void KortexMultiInterfaceHardware::leaveTorqueMode()
   setActuatorsControlMode(k_api::ActuatorConfig::ControlMode::POSITION, torque_joints_);
   use_effort_command_ = false;
   torque_joints_.assign(actuator_count_, false);
+}
+
+bool KortexMultiInterfaceHardware::currentTorqueConstantsAgree()
+{
+  // Still in POSITION mode, the arm's own loop holding gravity: the current it draws, through
+  // torque_constant and gear_ratio, should make about the torque the sensor reads. A wrong
+  // constant, or a current sign that is not effort_command_signs' (which CURRENT mode reuses),
+  // shows here while nothing moves. Joints carrying little torque (joint_1 on a level base,
+  // the wrist) cannot be checked this way, and are named.
+  const auto & cfg = current_torque_config_;
+  bool agree = true;
+  std::string unchecked;
+  for (std::size_t i = 0; i < actuator_count_; i++)
+  {
+    if (!torque_joints_[i])
+    {
+      continue;
+    }
+    const auto & actuator = feedback_.actuators(static_cast<int>(i));
+    const double measured = REPORTED_TORQUE_SIGN * actuator.torque();
+    const double from_current =
+      current_loops_[i].torqueFor(effort_command_signs_[i] * actuator.current_motor());
+    if (std::abs(measured) < cfg.kt_check_min_torque)
+    {
+      unchecked += (unchecked.empty() ? "" : ", ") + arm_joint_names_[i];
+      continue;
+    }
+    const double ratio = from_current / measured;
+    if (!(ratio >= 1.0 / cfg.kt_check_ratio && ratio <= cfg.kt_check_ratio))
+    {
+      RCLCPP_ERROR(
+        LOGGER,
+        "Torque constant check failed on '%s': it holds %+.2f N*m, its current %+.3f A makes "
+        "%+.2f N*m through %.3f N*m/A x %.0f (%s). Wrong torque_constant or gear_ratio, or the "
+        "current's sign is not effort_command_signs'?",
+        arm_joint_names_[i].c_str(), measured, actuator.current_motor(), from_current,
+        current_loops_[i].config().torque_constant, current_loops_[i].config().gear_ratio,
+        ratio < 0.0 ? "opposite sign" : "ratio out of bounds");
+      agree = false;
+    }
+  }
+  if (!unchecked.empty())
+  {
+    RCLCPP_WARN(
+      LOGGER, "Torque constant not checked on [%s]: under %.1f N*m held here", unchecked.c_str(),
+      cfg.kt_check_min_torque);
+  }
+  return agree;
+}
+
+bool KortexMultiInterfaceHardware::overSpeed()
+{
+  const double limit = current_torque_config_.speed_limit;
+  if (!(limit > 0.0))
+  {
+    return false;
+  }
+  for (std::size_t i = 0; i < actuator_count_; i++)
+  {
+    if (torque_joints_[i] && std::abs(arm_velocities_[i]) > limit)
+    {
+      RCLCPP_ERROR(
+        LOGGER, "'%s' at %.2f rad/s, over CURRENT mode's speed_limit %.2f",
+        arm_joint_names_[i].c_str(), arm_velocities_[i], limit);
+      return true;
+    }
+  }
+  return false;
 }
 
 void KortexMultiInterfaceHardware::sendJointCommands()
