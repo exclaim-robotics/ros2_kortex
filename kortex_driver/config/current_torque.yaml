@@ -28,6 +28,11 @@ current_limit: [4.4, 4.4, 4.4, 1.5, 1.5, 1.5]
 friction:
   velocity_threshold: 0.035   # rad/s (2 deg/s): slower is quasi-static
   error_threshold: 0.5        # N*m: at rest, stiction pushes the way a torque error this large points
+  # rad/s. 0: the terms switch hard at the thresholds above. > 0: smooth, coulomb as
+  # tanh(v / velocity_scale) and stiction as tanh(e / error_threshold), fading out as the joint
+  # moves; velocity_threshold is then unused. The hard switches step the torque by 2 x coulomb at
+  # every crossing, which velocity noise at rest makes constant (rackthor-001, 2026-10-27).
+  velocity_scale: 0.0
   # The paper's arm, for reference (7-DoF, its big joints 1-4, small 5-7):
   #   coulomb = stiction 2.15 big, 1.60 small N*m; viscous 2.00 big, 1.36 small N*m s/rad.
   coulomb: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

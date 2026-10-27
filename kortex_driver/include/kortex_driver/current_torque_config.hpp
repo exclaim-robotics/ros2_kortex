@@ -8,6 +8,7 @@
 //   lambda, torque_constant (N*m/A), current_limit (A)     required
 //   gear_ratio                                             default 100
 //   friction: velocity_threshold (rad/s), error_threshold (N*m),
+//             velocity_scale (rad/s, 0: the hard switches)
 //             coulomb, viscous, stiction                   default 0: off
 //   integral: gain (1/s), leak (s), bound (N*m)            gain 0: off; bound 5% of the URDF
 //                                                          effort limit
@@ -122,6 +123,7 @@ inline CurrentTorqueConfig parseCurrentTorqueConfig(
   config.kt_check_min_torque = scalar(safety, "kt_check_min_torque", config.kt_check_min_torque);
   const double velocity_threshold = scalar(friction, "velocity_threshold", 0.035);
   const double error_threshold = scalar(friction, "error_threshold", 0.5);
+  const double velocity_scale = scalar(friction, "velocity_scale", 0.0);
   const double gain = scalar(integral, "gain", 0.0);
   const double leak = scalar(integral, "leak", 0.1);
 
@@ -131,6 +133,7 @@ inline CurrentTorqueConfig parseCurrentTorqueConfig(
   if (!(config.kt_check_min_torque > 0.0)) bad("safety.kt_check_min_torque must be > 0");
   if (!(velocity_threshold > 0.0) || !(error_threshold > 0.0))
     bad("friction.velocity_threshold and error_threshold must be > 0");
+  if (!(velocity_scale >= 0.0)) bad("friction.velocity_scale must be >= 0 (0: off)");
   if (!(gain >= 0.0) || !(leak > 0.0)) bad("integral.gain must be >= 0 and integral.leak > 0");
 
   for (std::size_t i = 0; i < n; ++i)
@@ -152,6 +155,7 @@ inline CurrentTorqueConfig parseCurrentTorqueConfig(
     c.stiction = stiction[i];
     c.velocity_threshold = velocity_threshold;
     c.error_threshold = error_threshold;
+    c.velocity_scale = velocity_scale;
     c.integral_gain = gain;
     c.integral_leak = leak;
     c.integral_bound = bound[i];

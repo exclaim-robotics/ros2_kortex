@@ -455,7 +455,11 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
         summary << "\n  " << arm_joint_names_[i] << ": lambda " << c.lambda << ", Kt "
                 << c.torque_constant << " N*m/A x " << c.gear_ratio << ", limit "
                 << c.current_limit << " A; friction " << c.coulomb << " + " << c.viscous
-                << " v, stiction " << c.stiction << "; integral " << c.integral_gain << "/s, "
+                << " v, stiction " << c.stiction
+                << (c.velocity_scale > 0.0
+                      ? " (smooth, v_s " + std::to_string(c.velocity_scale) + " rad/s)"
+                      : std::string(" (switched)"))
+                << "; integral " << c.integral_gain << "/s, "
                 << c.integral_leak << " s, +-" << c.integral_bound << " N*m";
       }
       current_torque_control_ = true;

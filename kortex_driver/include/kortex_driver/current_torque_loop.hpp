@@ -24,6 +24,11 @@
 //   |e| >= error_threshold       stiction * sign(e)      (slower: quasi-static)
 //   otherwise                    0
 //
+// or, with velocity_scale > 0, the same terms without a step anywhere:
+//
+//   coulomb * tanh(v / velocity_scale) + viscous * v
+//     + stiction * tanh(e / error_threshold) * (1 - |tanh(v / velocity_scale)|)
+//
 // The paper switches stiction on the desired acceleration; the driver is given torques only, so
 // at rest stiction pushes the way the torque error points. Its rotor inertia term needs the
 // desired acceleration too and is left out.
@@ -51,6 +56,7 @@ struct CurrentTorqueJointConfig
   double stiction = 0.0;         // N*m
   double velocity_threshold = 0.035;  // rad/s: slower is quasi-static
   double error_threshold = 0.5;       // N*m: the torque error that brings stiction in at rest
+  double velocity_scale = 0.0;        // rad/s: > 0, the smooth friction model (see update)
   double integral_gain = 0.0;         // 1/s: d I/dt = integral_gain * e - I / integral_leak
   double integral_leak = 0.1;         // s
   double integral_bound = 0.0;        // N*m, both ways
@@ -98,7 +104,18 @@ public:
       integral_ = clamp(integral_, c.integral_bound);
     }
 
-    if (std::abs(velocity) >= c.velocity_threshold)
+    if (c.velocity_scale > 0.0)
+    {
+      // Smooth: no step anywhere. The hard switches below step the torque by 2 x coulomb each
+      // time the velocity crosses the threshold, and noise at rest crosses it all the time
+      // (joint_3: 774 flips of +-3 N*m while 95% stuck; joint_4 in a 12 Hz stick-slip cycle with
+      // crisp, 2026-10-27). Coulomb fades in with tanh(v / velocity_scale); stiction, the way
+      // the error points, with tanh(e / error_threshold), and fades out as the joint moves.
+      const double moving = std::tanh(velocity / c.velocity_scale);
+      friction_ = c.coulomb * moving + c.viscous * velocity +
+                  c.stiction * std::tanh(error_ / c.error_threshold) * (1.0 - std::abs(moving));
+    }
+    else if (std::abs(velocity) >= c.velocity_threshold)
     {
       friction_ = c.coulomb * sign(velocity) + c.viscous * velocity;
     }

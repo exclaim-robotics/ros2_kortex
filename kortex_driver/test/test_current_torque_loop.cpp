@@ -198,3 +198,50 @@ TEST(TorqueConstantCheck, AJointHeldByFrictionIsNotCheckedAWrongSignUnderCurrent
   // Too little held to tell anything.
   EXPECT_EQ(checkTorqueConstant(0.3, 0.0, 1.0, 1.6), TorqueConstantCheck::UNLOADED);
 }
+
+TEST(CurrentTorqueLoop, SmoothFrictionHasNoStepAndMatchesTheSwitchedFarFromZero)
+{
+  auto c = bigJoint();
+  c.coulomb = 3.0;
+  c.viscous = 1.0;
+  c.stiction = 2.0;
+  c.velocity_scale = 0.02;
+  CurrentTorqueLoop loop(c);
+  // Across v = 0 and across the old threshold, at a fixed error: no step bigger than the slope.
+  double last = 0.0;
+  double biggest = 0.0;
+  for (int k = -1000; k <= 1000; ++k)
+  {
+    const double v = 1e-4 * k;  // -0.1 .. 0.1 rad/s
+    loop.update(0.0, -1.0, v, DT);
+    if (k > -1000)
+    {
+      biggest = std::max(biggest, std::abs(loop.friction() - last));
+    }
+    last = loop.friction();
+  }
+  // The steepest slope is (coulomb + stiction * tanh(e / error_threshold)) / velocity_scale per
+  // rad/s, stiction fading out as Coulomb fades in: ~246 * 1e-4 = 0.025 N*m a step. The switched
+  // model steps 2 x coulomb = 6 N*m at the threshold.
+  EXPECT_LT(biggest, 0.03);
+  // Moving well past the scale: the switched model's Coulomb and viscous.
+  loop.update(0.0, 0.0, 0.2, DT);
+  EXPECT_NEAR(loop.friction(), 3.0 + 0.2, 1e-6);
+  // At rest: stiction the way the error points, smoothly in the error.
+  loop.update(0.0, 2.0, 0.0, DT);  // e = -2
+  EXPECT_NEAR(loop.friction(), -2.0 * std::tanh(2.0 / 0.5), 1e-12);
+  loop.update(0.0, 0.05, 0.0, DT);  // a small error: a small push, not nothing and not 2 N*m
+  EXPECT_NEAR(loop.friction(), -2.0 * std::tanh(0.1), 1e-12);
+}
+
+TEST(CurrentTorqueConfig, VelocityScaleIsOffByDefaultAndNotNegative)
+{
+  const std::string base = "lambda: 7\ntorque_constant: 0.11\ncurrent_limit: 2\n";
+  EXPECT_EQ(parseCurrentTorqueConfig(base, LIMITS).joints[0].velocity_scale, 0.0);
+  const auto smooth =
+    parseCurrentTorqueConfig(base + "friction:\n  velocity_scale: 0.02\n", LIMITS);
+  EXPECT_EQ(smooth.joints[5].velocity_scale, 0.02);
+  EXPECT_THROW(
+    parseCurrentTorqueConfig(base + "friction:\n  velocity_scale: -0.1\n", LIMITS),
+    std::runtime_error);
+}
