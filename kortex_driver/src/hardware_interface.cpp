@@ -461,6 +461,13 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
                       : std::string(" (switched)"))
                 << "; integral " << c.integral_gain << "/s, "
                 << c.integral_leak << " s, +-" << c.integral_bound << " N*m";
+        if (c.observer_bandwidth > 0.0)
+        {
+          summary << "; FRICTION OBSERVER " << c.observer_bandwidth << " Hz in place of lambda, "
+                  << "the friction terms and the integral (deadband " << c.observer_deadband
+                  << " N*m under " << c.observer_velocity_gate << " rad/s, +-" << c.observer_bound
+                  << " N*m, rotor " << c.rotor_inertia << " kg m^2)";
+        }
       }
       current_torque_control_ = true;
       RCLCPP_INFO(
@@ -1540,7 +1547,7 @@ void KortexMultiInterfaceHardware::prepareCommands()
           ->set_current_motor(static_cast<float>(effort_command_signs_[i] * current));
         arm_currents_sent_[i] = current;
         arm_torque_errors_[i] = current_loops_[i].error();
-        arm_torque_feedbacks_[i] = current_loops_[i].config().lambda * current_loops_[i].filtered();
+        arm_torque_feedbacks_[i] = current_loops_[i].feedback();
         arm_torque_integrals_[i] = current_loops_[i].integral();
         arm_torque_frictions_[i] = current_loops_[i].friction();
       }

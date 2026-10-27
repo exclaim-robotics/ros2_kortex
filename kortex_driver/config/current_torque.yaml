@@ -25,6 +25,18 @@ gear_ratio: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
 # the loop's correction on top of the command.
 current_limit: [4.4, 4.4, 4.4, 1.5, 1.5, 1.5]
 
+# The friction observer in place of lambda * H, the friction terms and the integral, per joint
+# (bandwidth 0: off). See current_torque_loop.hpp. Simulated (rackthor_common
+# identification/friction-sim.py): ~10 Hz the most with margin, unstable from ~15 Hz; on the
+# arm, start at 3-5 Hz and raise. bound has to clear the breakaway (rackthor-001: ~9-10 N*m big,
+# ~2.5-3 small, friction-sweep.py 2026-10-27).
+observer:
+  bandwidth: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  deadband: 0.5            # N*m: a still joint's estimate is held while |e| is under this
+  velocity_gate: 0.005     # rad/s
+  bound: [20.0, 20.0, 20.0, 6.0, 6.0, 6.0]
+  rotor_inertia: [0.40, 0.40, 0.40, 0.22, 0.22, 0.22]   # kg m^2 at the joint (mc_kinova)
+
 friction:
   velocity_threshold: 0.035   # rad/s (2 deg/s): slower is quasi-static
   error_threshold: 0.5        # N*m: at rest, stiction pushes the way a torque error this large points

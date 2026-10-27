@@ -35,6 +35,21 @@
 //
 // Overcompensated friction pushes a joint along by itself: every friction term starts at 0 and
 // is raised on the arm, joint by joint. The current is clamped to current_limit.
+//
+// Or, with observer_bandwidth > 0, a friction observer in place of lambda * H, I and F (after
+// Le Tien and Albu-Schaeffer's for joints with torque sensors): on the gearbox's side
+//
+//   f_hat  <- low-pass at observer_bandwidth of (tau_motor - tau_measured - rotor_inertia * a)
+//   current = (tau_desired + f_hat) / (Kt * G)
+//
+// with tau_motor the torque last commanded and a the joint's acceleration from its velocity.
+// It needs no friction model and follows load, pose and temperature. While a joint is stuck the
+// 'friction' it measures is just the torque applied, and integrating that hunts (a slow
+// slip back and forth at rest); so f_hat is held while the joint is still (|v| under
+// observer_velocity_gate) and the error small (|e| under observer_deadband). Simulated on a big
+// joint with rackthor-001's friction (rackthor_common identification/friction-sim.py): ~5x the
+// tracking of lambda * H, quiet at rest, unstable from ~15 Hz (the drive's elasticity, the
+// delay); f_hat is bounded by observer_bound, which has to clear the breakaway.
 
 #ifndef KORTEX_DRIVER__CURRENT_TORQUE_LOOP_HPP_
 #define KORTEX_DRIVER__CURRENT_TORQUE_LOOP_HPP_
@@ -60,6 +75,11 @@ struct CurrentTorqueJointConfig
   double integral_gain = 0.0;         // 1/s: d I/dt = integral_gain * e - I / integral_leak
   double integral_leak = 0.1;         // s
   double integral_bound = 0.0;        // N*m, both ways
+  double observer_bandwidth = 0.0;    // Hz: > 0, the friction observer in place of lambda * H
+  double observer_deadband = 0.5;     // N*m: |e| under which a still joint's f_hat is held
+  double observer_velocity_gate = 0.005;  // rad/s: slower is still, for the deadband
+  double observer_bound = 0.0;        // N*m, |f_hat| at most
+  double rotor_inertia = 0.0;         // kg m^2, at the joint (Gen3: 0.40 big, 0.22 small)
 };
 
 class CurrentTorqueLoop
@@ -83,12 +103,18 @@ public:
     e1_ = e2_ = h1_ = h2_ = 0.0;
     integral_ = 0.0;
     error_ = filtered_ = friction_ = current_ = 0.0;
+    f_hat_ = last_torque_ = v_f_ = acceleration_ = 0.0;
+    started_ = false;
   }
 
   // The motor current (A, ROS sign) for one cycle of dt seconds. The filter assumes PERIOD.
   double update(double tau_desired, double tau_measured, double velocity, double dt)
   {
     const auto & c = config_;
+    if (c.observer_bandwidth > 0.0)
+    {
+      return observe(tau_desired, tau_measured, velocity, dt);
+    }
     error_ = tau_desired - tau_measured;
     filtered_ = B0 * error_ + B1 * e1_ + B2 * e2_ - A1 * h1_ - A2 * h2_;
     e2_ = e1_;
@@ -143,14 +169,51 @@ public:
     return current * config_.torque_constant * config_.gear_ratio;
   }
 
-  // The last update's terms, for logging and tuning.
+  // The last update's terms, for logging and tuning. feedback(): lambda * H(e), 0 under the
+  // observer, whose estimate is friction().
   double error() const { return error_; }
   double filtered() const { return filtered_; }
+  double feedback() const
+  {
+    return config_.observer_bandwidth > 0.0 ? 0.0 : config_.lambda * filtered_;
+  }
+  double acceleration() const { return acceleration_; }
   double integral() const { return integral_; }
   double friction() const { return friction_; }
   double current() const { return current_; }
 
 private:
+  double observe(double tau_desired, double tau_measured, double velocity, double dt)
+  {
+    const auto & c = config_;
+    error_ = tau_desired - tau_measured;
+    // The acceleration from the velocity, filtered first (the actuator's velocity is noisy):
+    // ~60 Hz at 1 kHz, below the drive's elastic mode, above the observer.
+    if (!started_)
+    {
+      v_f_ = velocity;
+      started_ = true;
+    }
+    const double v_prev = v_f_;
+    v_f_ += VELOCITY_FILTER * (velocity - v_f_);
+    acceleration_ = dt > 0.0 ? (v_f_ - v_prev) / dt : 0.0;
+
+    const double residual = last_torque_ - tau_measured - c.rotor_inertia * acceleration_;
+    const double moving = std::tanh(std::pow(v_f_ / c.observer_velocity_gate, 2));
+    const double pushed = std::tanh(std::pow(error_ / c.observer_deadband, 4));
+    const double alpha =
+      (1.0 - std::exp(-2.0 * PI * c.observer_bandwidth * dt)) * std::max(moving, pushed);
+    f_hat_ = clamp(f_hat_ + alpha * (residual - f_hat_), c.observer_bound);
+    friction_ = f_hat_;
+    filtered_ = integral_ = 0.0;
+
+    current_ = clamp(currentFor(tau_desired + f_hat_), c.current_limit);
+    last_torque_ = torqueFor(current_);  // what the clamp let through
+    return current_;
+  }
+
+  static constexpr double VELOCITY_FILTER = 0.3;
+  static constexpr double PI = 3.14159265358979323846;
   static double sign(double x) { return (x > 0.0) - (x < 0.0); }
   static double clamp(double x, double limit) { return std::max(-limit, std::min(x, limit)); }
 
@@ -158,6 +221,8 @@ private:
   double e1_ = 0.0, e2_ = 0.0, h1_ = 0.0, h2_ = 0.0;
   double integral_ = 0.0;
   double error_ = 0.0, filtered_ = 0.0, friction_ = 0.0, current_ = 0.0;
+  double f_hat_ = 0.0, last_torque_ = 0.0, v_f_ = 0.0, acceleration_ = 0.0;
+  bool started_ = false;
 };
 
 // The switch's check of one joint, held still in POSITION mode: the torque its sensor reads

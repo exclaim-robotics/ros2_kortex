@@ -12,6 +12,9 @@
 //             coulomb, viscous, stiction                   default 0: off
 //   integral: gain (1/s), leak (s), bound (N*m)            gain 0: off; bound 5% of the URDF
 //                                                          effort limit
+//   observer: bandwidth (Hz, 0: lambda * H), deadband (N*m), velocity_gate (rad/s),
+//             bound (N*m), rotor_inertia (kg m^2)          the friction observer in place of
+//                                                          lambda * H, I and F
 //   safety:   speed_limit (rad/s, 0 off), kt_check_ratio, kt_check_min_torque (N*m)
 
 #ifndef KORTEX_DRIVER__CURRENT_TORQUE_CONFIG_HPP_
@@ -99,6 +102,7 @@ inline CurrentTorqueConfig parseCurrentTorqueConfig(
   const YAML::Node friction = root["friction"] ? root["friction"] : none;
   const YAML::Node integral = root["integral"] ? root["integral"] : none;
   const YAML::Node safety = root["safety"] ? root["safety"] : none;
+  const YAML::Node observer = root["observer"] ? root["observer"] : none;
 
   const auto lambda = perJoint(root, "lambda", n, required);
   const auto kt = perJoint(root, "torque_constant", n, required);
@@ -107,6 +111,11 @@ inline CurrentTorqueConfig parseCurrentTorqueConfig(
   const auto coulomb = perJoint(friction, "coulomb", n, 0.0);
   const auto viscous = perJoint(friction, "viscous", n, 0.0);
   const auto stiction = perJoint(friction, "stiction", n, 0.0);
+  const auto obs_bandwidth = perJoint(observer, "bandwidth", n, 0.0);
+  const auto obs_deadband = perJoint(observer, "deadband", n, 0.5);
+  const auto obs_gate = perJoint(observer, "velocity_gate", n, 0.005);
+  const auto obs_bound = perJoint(observer, "bound", n, 0.0);
+  const auto rotor = perJoint(observer, "rotor_inertia", n, 0.0);
   std::vector<double> bound(n);
   for (std::size_t i = 0; i < n; ++i)
   {
@@ -145,6 +154,12 @@ inline CurrentTorqueConfig parseCurrentTorqueConfig(
     if (!(coulomb[i] >= 0.0) || !(viscous[i] >= 0.0) || !(stiction[i] >= 0.0))
       bad("friction terms must be >= 0" + j);
     if (!(bound[i] >= 0.0)) bad("integral.bound must be >= 0" + j);
+    if (!(obs_bandwidth[i] >= 0.0 && obs_bandwidth[i] <= 50.0))
+      bad("observer.bandwidth must be in [0, 50] Hz" + j);
+    if (obs_bandwidth[i] > 0.0 &&
+        (!(obs_deadband[i] > 0.0) || !(obs_gate[i] > 0.0) || !(obs_bound[i] > 0.0) ||
+         !(rotor[i] >= 0.0)))
+      bad("observer: deadband, velocity_gate and bound must be > 0, rotor_inertia >= 0" + j);
     CurrentTorqueJointConfig c;
     c.lambda = lambda[i];
     c.torque_constant = kt[i];
@@ -159,6 +174,11 @@ inline CurrentTorqueConfig parseCurrentTorqueConfig(
     c.integral_gain = gain;
     c.integral_leak = leak;
     c.integral_bound = bound[i];
+    c.observer_bandwidth = obs_bandwidth[i];
+    c.observer_deadband = obs_deadband[i];
+    c.observer_velocity_gate = obs_gate[i];
+    c.observer_bound = obs_bound[i];
+    c.rotor_inertia = rotor[i];
     config.joints.push_back(c);
   }
   return config;

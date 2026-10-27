@@ -245,3 +245,108 @@ TEST(CurrentTorqueConfig, VelocityScaleIsOffByDefaultAndNotNegative)
     parseCurrentTorqueConfig(base + "friction:\n  velocity_scale: -0.1\n", LIMITS),
     std::runtime_error);
 }
+
+namespace
+{
+// A rigid joint: rotor (J_m) and link (J_l) as one, Coulomb friction on the rotor's side, the
+// sensor between gearbox and link reading J_l * a. The observer's residual is then the friction.
+struct RigidJoint
+{
+  double J_m = 0.40, J_l = 1.5, coulomb = 5.0;
+  double v = 0.0, q = 0.0, a = 0.0;
+  double sensor() const { return J_l * a; }
+  void step(double tau_motor, double dt)
+  {
+    const double f = v > 0.0 ? coulomb : v < 0.0 ? -coulomb : 0.0;
+    a = (tau_motor - f) / (J_m + J_l);
+    v += a * dt;
+    q += v * dt;
+  }
+};
+
+CurrentTorqueJointConfig observerJoint(double bandwidth = 10.0)
+{
+  auto c = bigJoint();
+  c.observer_bandwidth = bandwidth;
+  c.observer_bound = 20.0;
+  c.rotor_inertia = 0.40;
+  return c;
+}
+}  // namespace
+
+TEST(CurrentTorqueLoop, TheObserverFindsTheFrictionOfAMovingJoint)
+{
+  CurrentTorqueLoop loop(observerJoint());
+  RigidJoint joint;
+  joint.v = 0.05;  // moving: the observer integrates
+  for (int k = 0; k < 2000; ++k)
+  {
+    // a soft speed loop around 0.05 rad/s stands in for crisp
+    const double tau_d = 20.0 * (0.05 - joint.v);
+    const double current = loop.update(tau_d, joint.sensor(), joint.v, DT);
+    joint.step(loop.torqueFor(current), DT);
+  }
+  EXPECT_NEAR(loop.friction(), 5.0, 0.5);       // the estimate is the friction
+  EXPECT_NEAR(joint.v, 0.05, 0.005);            // so the speed loop no longer carries it
+  EXPECT_EQ(loop.feedback(), 0.0);              // no lambda * H under the observer
+}
+
+TEST(CurrentTorqueLoop, TheObserverHoldsAStillJointInsideTheDeadband)
+{
+  // Stuck, a small error: what it would measure is just the torque applied, and integrating
+  // that hunts. The gate is smooth (tanh((e / deadband)^4)): the estimate barely moves.
+  CurrentTorqueLoop loop(observerJoint());
+  for (int k = 0; k < 2000; ++k)
+  {
+    loop.update(3.0, 2.9, 0.0, DT);  // e = 0.1 N*m, the joint still
+  }
+  EXPECT_LT(std::abs(loop.friction()), 0.05);  // ungated, it would be ~3 N*m
+  // Pushed past the deadband, it integrates even while still: breakaway.
+  for (int k = 0; k < 2000; ++k)
+  {
+    loop.update(3.0, 1.0, 0.0, DT);  // e = 2 N*m
+  }
+  EXPECT_GT(loop.friction(), 1.0);
+}
+
+TEST(CurrentTorqueLoop, TheObserverIsBoundedAndTheCurrentClamped)
+{
+  auto c = observerJoint();
+  c.observer_bound = 4.0;
+  CurrentTorqueLoop loop(c);
+  for (int k = 0; k < 5000; ++k)
+  {
+    loop.update(30.0, -30.0, 0.1, DT);  // a huge residual, moving
+  }
+  EXPECT_NEAR(std::abs(loop.friction()), 4.0, 1e-9);
+  EXPECT_LE(std::abs(loop.current()), c.current_limit + 1e-12);
+}
+
+TEST(CurrentTorqueConfig, TheObserverIsOffByDefaultAndChecked)
+{
+  const std::string base = "lambda: 7\ntorque_constant: 0.11\ncurrent_limit: 2\n";
+  EXPECT_EQ(parseCurrentTorqueConfig(base, LIMITS).joints[0].observer_bandwidth, 0.0);
+  const std::string obs =
+    "observer:\n  bandwidth: [5, 5, 5, 0, 0, 0]\n  bound: 20\n  rotor_inertia: 0.4\n";
+  const auto on = parseCurrentTorqueConfig(base + obs, LIMITS);
+  EXPECT_EQ(on.joints[0].observer_bandwidth, 5.0);
+  EXPECT_EQ(on.joints[3].observer_bandwidth, 0.0);
+  EXPECT_EQ(on.joints[2].observer_deadband, 0.5);
+  EXPECT_THROW(
+    parseCurrentTorqueConfig(base + "observer:\n  bandwidth: 60\n  bound: 20\n", LIMITS),
+    std::runtime_error);
+  EXPECT_THROW(  // on, but no bound: it could never reach the breakaway
+    parseCurrentTorqueConfig(base + "observer:\n  bandwidth: 5\n", LIMITS), std::runtime_error);
+}
+
+TEST(CurrentTorqueConfig, TheShippedFileKeepsTheObserverOff)
+{
+  std::ifstream file(std::string(KORTEX_DRIVER_CONFIG_DIR) + "/current_torque.yaml");
+  std::stringstream text;
+  text << file.rdbuf();
+  const auto config = parseCurrentTorqueConfig(text.str(), LIMITS);
+  for (const auto & j : config.joints)
+  {
+    EXPECT_EQ(j.observer_bandwidth, 0.0);
+  }
+}
