@@ -27,6 +27,7 @@
 #include <cmath>
 #include <exception>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -260,6 +261,12 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
   arm_positions_.resize(actuator_count_, std::numeric_limits<double>::quiet_NaN());
   arm_velocities_.resize(actuator_count_, std::numeric_limits<double>::quiet_NaN());
   arm_efforts_.resize(actuator_count_, std::numeric_limits<double>::quiet_NaN());
+  for (auto * v : {&arm_efforts_sent_, &arm_motor_currents_, &arm_currents_sent_,
+                   &arm_torque_errors_, &arm_torque_feedbacks_, &arm_torque_integrals_,
+                   &arm_torque_frictions_})
+  {
+    v->assign(actuator_count_, 0.0);
+  }
   arm_commands_positions_.resize(actuator_count_, std::numeric_limits<double>::quiet_NaN());
   arm_commands_velocities_.resize(actuator_count_, std::numeric_limits<double>::quiet_NaN());
   arm_commands_efforts_.resize(actuator_count_, std::numeric_limits<double>::quiet_NaN());
@@ -552,6 +559,20 @@ KortexMultiInterfaceHardware::export_state_interfaces()
       arm_joint_names[i], hardware_interface::HW_IF_VELOCITY, &arm_velocities_[i]));
     state_interfaces.emplace_back(hardware_interface::StateInterface(
       arm_joint_names[i], hardware_interface::HW_IF_EFFORT, &arm_efforts_[i]));
+    state_interfaces.emplace_back(
+      hardware_interface::StateInterface(arm_joint_names[i], "effort_sent", &arm_efforts_sent_[i]));
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+      arm_joint_names[i], "motor_current", &arm_motor_currents_[i]));
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+      arm_joint_names[i], "current_sent", &arm_currents_sent_[i]));
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+      arm_joint_names[i], "torque_error", &arm_torque_errors_[i]));
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+      arm_joint_names[i], "torque_feedback", &arm_torque_feedbacks_[i]));
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+      arm_joint_names[i], "torque_integral", &arm_torque_integrals_[i]));
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+      arm_joint_names[i], "torque_friction", &arm_torque_frictions_[i]));
   }
 
   // state interface which reports if robot is faulted
@@ -1217,6 +1238,8 @@ return_type KortexMultiInterfaceHardware::read(
     arm_efforts_[i] = REPORTED_TORQUE_SIGN * feedback_.actuators(i).torque();  // N*m, ROS sign
     // read velocity
     arm_velocities_[i] = KortexMathUtil::toRad(feedback_.actuators(i).velocity());  // rad/sec
+    // read motor current, signed like the torque it makes
+    arm_motor_currents_[i] = effort_command_signs_[i] * feedback_.actuators(i).current_motor();
     // read position, calibrated (joint_calibration_; the raw angle when there is none)
     arm_positions_[i] = calibratedPosition(feedback_, i);  // rad
 
@@ -1511,7 +1534,17 @@ void KortexMultiInterfaceHardware::prepareCommands()
           arm_velocities_[i], write_period_);
         base_command_.mutable_actuators(static_cast<int>(i))
           ->set_current_motor(static_cast<float>(effort_command_signs_[i] * current));
+        arm_currents_sent_[i] = current;
+        arm_torque_errors_[i] = current_loops_[i].error();
+        arm_torque_feedbacks_[i] = current_loops_[i].config().lambda * current_loops_[i].filtered();
+        arm_torque_integrals_[i] = current_loops_[i].integral();
+        arm_torque_frictions_[i] = current_loops_[i].friction();
       }
+      else
+      {
+        clearCurrentLoopStates(i);
+      }
+      arm_efforts_sent_[i] = effort;
     }
     else if (use_velocity_command_)
     {
@@ -1521,11 +1554,15 @@ void KortexMultiInterfaceHardware::prepareCommands()
       base_command_.mutable_actuators(static_cast<int>(i))
         ->set_position(feedback_.actuators(static_cast<int>(i)).position());
       base_command_.mutable_actuators(static_cast<int>(i))->set_velocity(cmd_vel_tmp_);
+      arm_efforts_sent_[i] = 0.0;
+      clearCurrentLoopStates(i);
     }
     else
     {
       // POSITION mode; in torque mode, the joints the effort controller does not claim, holding
       base_command_.mutable_actuators(static_cast<int>(i))->set_position(cmd_degrees_tmp_);
+      arm_efforts_sent_[i] = 0.0;
+      clearCurrentLoopStates(i);
     }
     base_command_.mutable_actuators(static_cast<int>(i))->set_command_id(base_command_.frame_id());
   }
@@ -1746,6 +1783,15 @@ void KortexMultiInterfaceHardware::leaveTorqueMode()
   torque_joints_.assign(actuator_count_, false);
 }
 
+void KortexMultiInterfaceHardware::clearCurrentLoopStates(std::size_t i)
+{
+  arm_currents_sent_[i] = 0.0;
+  arm_torque_errors_[i] = 0.0;
+  arm_torque_feedbacks_[i] = 0.0;
+  arm_torque_integrals_[i] = 0.0;
+  arm_torque_frictions_[i] = 0.0;
+}
+
 bool KortexMultiInterfaceHardware::currentTorqueConstantsAgree()
 {
   // Still in POSITION mode, the arm's own loop holding gravity: the current it draws, through
@@ -1755,7 +1801,7 @@ bool KortexMultiInterfaceHardware::currentTorqueConstantsAgree()
   // the wrist) cannot be checked this way, and are named.
   const auto & cfg = current_torque_config_;
   bool agree = true;
-  std::string unchecked;
+  std::string unchecked, friction_held;
   for (std::size_t i = 0; i < actuator_count_; i++)
   {
     if (!torque_joints_[i])
@@ -1766,14 +1812,24 @@ bool KortexMultiInterfaceHardware::currentTorqueConstantsAgree()
     const double measured = REPORTED_TORQUE_SIGN * actuator.torque();
     const double from_current =
       current_loops_[i].torqueFor(effort_command_signs_[i] * actuator.current_motor());
-    if (std::abs(measured) < cfg.kt_check_min_torque)
+    const auto check =
+      checkTorqueConstant(measured, from_current, cfg.kt_check_min_torque, cfg.kt_check_ratio);
+    if (check == TorqueConstantCheck::UNLOADED)
     {
       unchecked += (unchecked.empty() ? "" : ", ") + arm_joint_names_[i];
       continue;
     }
-    const double ratio = from_current / measured;
-    if (!(ratio >= 1.0 / cfg.kt_check_ratio && ratio <= cfg.kt_check_ratio))
+    if (check == TorqueConstantCheck::HELD_BY_FRICTION)
     {
+      std::ostringstream held;
+      held << std::showpos << std::fixed << std::setprecision(1) << arm_joint_names_[i] << " ("
+           << measured << " N*m on " << std::setprecision(3) << actuator.current_motor() << " A)";
+      friction_held += (friction_held.empty() ? "" : ", ") + held.str();
+      continue;
+    }
+    if (check == TorqueConstantCheck::DISAGREES)
+    {
+      const double ratio = from_current / measured;
       RCLCPP_ERROR(
         LOGGER,
         "Torque constant check failed on '%s': it holds %+.2f N*m, its current %+.3f A makes "
@@ -1790,6 +1846,14 @@ bool KortexMultiInterfaceHardware::currentTorqueConstantsAgree()
     RCLCPP_WARN(
       LOGGER, "Torque constant not checked on [%s]: under %.1f N*m held here", unchecked.c_str(),
       cfg.kt_check_min_torque);
+  }
+  if (!friction_held.empty())
+  {
+    RCLCPP_WARN(
+      LOGGER,
+      "Torque constant not checked on [%s]: the gearbox's friction holds the load, the current "
+      "makes under %.1f N*m of it (current-torque-check after a lift checks these)",
+      friction_held.c_str(), cfg.kt_check_min_torque);
   }
   return agree;
 }

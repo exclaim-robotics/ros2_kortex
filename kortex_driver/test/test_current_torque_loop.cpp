@@ -181,3 +181,20 @@ TEST(CurrentTorqueConfig, WhatIsMissingOrWrongIsRefused)
   EXPECT_TRUE(refused("lambda: [7, 7\n"));                                     // not YAML
   EXPECT_FALSE(refused("lambda: 7\ntorque_constant: 0.1\ncurrent_limit: 2\n"));
 }
+
+TEST(TorqueConstantCheck, AJointHeldByFrictionIsNotCheckedAWrongSignUnderCurrentFails)
+{
+  using kortex_driver::checkTorqueConstant;
+  using kortex_driver::TorqueConstantCheck;
+  // Settled lifting: the current makes 9.3 of the 12.0 N*m held (joint_3, 2026-10-27).
+  EXPECT_EQ(checkTorqueConstant(12.0, 9.26, 1.0, 1.6), TorqueConstantCheck::AGREES);
+  // Settled lowering: friction holds it, 0.04 A of noise either way (joint_3, joint_1).
+  EXPECT_EQ(checkTorqueConstant(10.7, 0.13, 1.0, 1.6), TorqueConstantCheck::HELD_BY_FRICTION);
+  EXPECT_EQ(checkTorqueConstant(1.26, -0.13, 1.0, 1.6), TorqueConstantCheck::HELD_BY_FRICTION);
+  // A wrong sign, or a constant far off, under a current that carries the load.
+  EXPECT_EQ(checkTorqueConstant(12.0, -9.0, 1.0, 1.6), TorqueConstantCheck::DISAGREES);
+  EXPECT_EQ(checkTorqueConstant(12.0, 4.0, 1.0, 1.6), TorqueConstantCheck::DISAGREES);
+  EXPECT_EQ(checkTorqueConstant(5.0, 9.0, 1.0, 1.6), TorqueConstantCheck::DISAGREES);
+  // Too little held to tell anything.
+  EXPECT_EQ(checkTorqueConstant(0.3, 0.0, 1.0, 1.6), TorqueConstantCheck::UNLOADED);
+}

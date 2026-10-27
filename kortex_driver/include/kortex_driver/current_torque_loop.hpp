@@ -143,6 +143,36 @@ private:
   double error_ = 0.0, filtered_ = 0.0, friction_ = 0.0, current_ = 0.0;
 };
 
+// The switch's check of one joint, held still in POSITION mode: the torque its sensor reads
+// (measured) against the torque its motor current makes through torque_constant and
+// gear_ratio (from_current), both N*m in the ROS sign.
+enum class TorqueConstantCheck
+{
+  AGREES,
+  DISAGREES,        // the ratio is out of bounds or the sign is opposite
+  UNLOADED,         // under min_torque held: nothing to compare
+  HELD_BY_FRICTION  // a load, but the current makes under min_torque of it
+};
+
+inline TorqueConstantCheck checkTorqueConstant(
+  double measured, double from_current, double min_torque, double ratio_bound)
+{
+  if (std::abs(measured) < min_torque)
+  {
+    return TorqueConstantCheck::UNLOADED;
+  }
+  // A joint that settled while lowering carries its load on the gearbox's friction and draws
+  // ~no current: joint_3 held 11.6 N*m on 0.04 A (2026-10-27). Its current is noise, so
+  // neither the constant nor the sign shows; a wrong sign under a real current still does.
+  if (std::abs(from_current) < min_torque)
+  {
+    return TorqueConstantCheck::HELD_BY_FRICTION;
+  }
+  const double ratio = from_current / measured;
+  return (ratio >= 1.0 / ratio_bound && ratio <= ratio_bound) ? TorqueConstantCheck::AGREES
+                                                              : TorqueConstantCheck::DISAGREES;
+}
+
 }  // namespace kortex_driver
 
 #endif  // KORTEX_DRIVER__CURRENT_TORQUE_LOOP_HPP_

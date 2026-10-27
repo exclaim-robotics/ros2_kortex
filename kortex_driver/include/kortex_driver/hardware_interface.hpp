@@ -188,6 +188,21 @@ private:
   std::vector<double> arm_velocities_;
   std::vector<double> arm_efforts_;
 
+  // What torque control did with each joint, as state interfaces (on /dynamic_joint_states,
+  // for bags and plots), all in the ROS sign: effort_sent, the effort command after the rate
+  // limit and the clamp; in CURRENT mode the loop's terms (current_torque_loop.hpp) and the
+  // current it sent. 0 on a joint not under torque control. motor_current is the actuator's
+  // measured current in every mode, signed like the torque it makes (effort_command_signs):
+  // with the joint torque sensor and the rotor's inertia, the joint's friction.
+  std::vector<double> arm_efforts_sent_;      // N*m
+  std::vector<double> arm_motor_currents_;    // A
+  std::vector<double> arm_currents_sent_;     // A
+  std::vector<double> arm_torque_errors_;     // N*m, e = effort sent - effort measured
+  std::vector<double> arm_torque_feedbacks_;  // N*m, lambda * H(e)
+  std::vector<double> arm_torque_integrals_;  // N*m
+  std::vector<double> arm_torque_frictions_;  // N*m, the friction compensation
+  void clearCurrentLoopStates(std::size_t i);
+
   // twist command interfaces
   std::vector<double> twist_commands_;
 
