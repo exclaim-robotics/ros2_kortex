@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <sstream>
@@ -349,4 +350,68 @@ TEST(CurrentTorqueConfig, TheShippedFileKeepsTheObserverOff)
   {
     EXPECT_EQ(j.observer_bandwidth, 0.0);
   }
+}
+
+namespace
+{
+// A joint on a spring (crisp's stiffness, its own damping left out), set swinging, no friction:
+// the largest |q| over the last second of `seconds`.
+double swingAfter(CurrentTorqueJointConfig c, double seconds)
+{
+  CurrentTorqueLoop loop(c);
+  RigidJoint joint;
+  joint.coulomb = 0.0;
+  joint.q = 0.02;
+  double peak = 0.0;
+  const int steps = static_cast<int>(seconds / DT);
+  for (int k = 0; k < steps; ++k)
+  {
+    const double current = loop.update(-200.0 * joint.q, joint.sensor(), joint.v, DT);
+    joint.step(loop.torqueFor(current), DT);
+    if (k >= steps - 1000)
+    {
+      peak = std::max(peak, std::abs(joint.q));
+    }
+  }
+  return peak;
+}
+}  // namespace
+
+TEST(CurrentTorqueLoop, TheDamperTakesOutASwing)
+{
+  // 1.9 kg m^2 on 200 N*m/rad: 1.6 Hz. 3 N*m s/rad is 8% of critical, a decay of 0.8/s.
+  auto c = bigJoint();
+  const double undamped = swingAfter(c, 3.0);
+  EXPECT_GT(undamped, 0.019);  // undamped, it still swings
+  c.damping = 3.0;
+  EXPECT_LT(swingAfter(c, 3.0), 0.25 * undamped);
+  c.observer_bandwidth = 5.0;  // and under the observer
+  c.observer_bound = 20.0;
+  c.rotor_inertia = 0.40;
+  EXPECT_LT(swingAfter(c, 3.0), 0.25 * undamped);
+}
+
+TEST(CurrentTorqueLoop, TheDamperIsMinusDampingTimesTheVelocityAndNothingAtRest)
+{
+  auto c = bigJoint();
+  c.damping = 2.0;
+  CurrentTorqueLoop loop(c);
+  EXPECT_NEAR(loop.update(11.0, 0.0, 0.0, DT), 1.0, 1e-12);  // still: the feedforward alone
+  EXPECT_EQ(loop.damper(), 0.0);
+  for (int k = 0; k < 100; ++k)
+  {
+    loop.update(11.0, 0.0, 0.5, DT);  // the filter settled
+  }
+  EXPECT_NEAR(loop.damper(), -1.0, 1e-9);
+  EXPECT_NEAR(loop.current(), 10.0 / 11.0, 1e-9);
+}
+
+TEST(CurrentTorqueConfig, TheDamperIsOffByDefaultAndChecked)
+{
+  const std::string base = "lambda: 7\ntorque_constant: 0.11\ncurrent_limit: 2\n";
+  EXPECT_EQ(parseCurrentTorqueConfig(base, LIMITS).joints[0].damping, 0.0);
+  const auto on = parseCurrentTorqueConfig(base + "damping: [1, 1, 1, 0.3, 0.3, 0.3]\n", LIMITS);
+  EXPECT_EQ(on.joints[0].damping, 1.0);
+  EXPECT_EQ(on.joints[5].damping, 0.3);
+  EXPECT_THROW(parseCurrentTorqueConfig(base + "damping: -1\n", LIMITS), std::runtime_error);
 }

@@ -37,6 +37,13 @@ observer:
   bound: [20.0, 20.0, 20.0, 6.0, 6.0, 6.0]
   rotor_inertia: [0.40, 0.40, 0.40, 0.22, 0.22, 0.22]   # kg m^2 at the joint (mc_kinova)
 
+# N*m s/rad: a joint damper, -damping * v on the torque the loop follows (v low-passed at
+# ~60 Hz), under lambda * H or the observer. For the joints' last shaking as they settle, at
+# 1 kHz where crisp's damping is slower. No offset at rest; a drag while moving. Too much buzzes
+# (the filter's lag, the velocity's noise): first values, not yet tried on the arm; raise joint
+# by joint, ~2 big and ~0.5 small the most to expect.
+damping: [0.5, 0.5, 0.5, 0.2, 0.2, 0.2]
+
 friction:
   velocity_threshold: 0.035   # rad/s (2 deg/s): slower is quasi-static
   error_threshold: 0.5        # N*m: at rest, stiction pushes the way a torque error this large points

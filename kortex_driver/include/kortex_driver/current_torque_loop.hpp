@@ -50,6 +50,17 @@
 // joint with rackthor-001's friction (rackthor_common identification/friction-sim.py): ~5x the
 // tracking of lambda * H, quiet at rest, unstable from ~15 Hz (the drive's elasticity, the
 // delay); f_hat is bounded by observer_bound, which has to clear the breakaway.
+//
+// Under either, a joint damper, damping > 0: the torque the loop follows is
+//
+//   tau_desired - damping * v_f
+//
+// with v_f the joint's velocity low-passed at ~60 Hz. crisp's damping acts at its own rate,
+// through the Cartesian impedance and the arm's Jacobian; the joints' last shaking as they
+// settle (the gearbox's elasticity, the friction letting go and catching) is faster, and this
+// takes it out at 1 kHz on each joint's own velocity. It holds nothing and adds no offset at
+// rest; moving, it is a drag crisp's stiffness has to overcome, like viscous friction. Too much,
+// and the filter's lag and the actuator's velocity noise make it buzz: raise it from 0.
 
 #ifndef KORTEX_DRIVER__CURRENT_TORQUE_LOOP_HPP_
 #define KORTEX_DRIVER__CURRENT_TORQUE_LOOP_HPP_
@@ -80,6 +91,7 @@ struct CurrentTorqueJointConfig
   double observer_velocity_gate = 0.005;  // rad/s: slower is still, for the deadband
   double observer_bound = 0.0;        // N*m, |f_hat| at most
   double rotor_inertia = 0.0;         // kg m^2, at the joint (Gen3: 0.40 big, 0.22 small)
+  double damping = 0.0;               // N*m s/rad: the joint damper, 0 off
 };
 
 class CurrentTorqueLoop
@@ -103,7 +115,7 @@ public:
     e1_ = e2_ = h1_ = h2_ = 0.0;
     integral_ = 0.0;
     error_ = filtered_ = friction_ = current_ = 0.0;
-    f_hat_ = last_torque_ = v_f_ = acceleration_ = 0.0;
+    f_hat_ = last_torque_ = v_f_ = acceleration_ = damper_ = 0.0;
     started_ = false;
   }
 
@@ -111,9 +123,22 @@ public:
   double update(double tau_desired, double tau_measured, double velocity, double dt)
   {
     const auto & c = config_;
+    // The velocity, filtered (the actuator's is noisy): ~60 Hz at 1 kHz, below the drive's
+    // elastic mode, above the observer and crisp. The damper's and the observer's.
+    if (!started_)
+    {
+      v_f_ = velocity;
+      started_ = true;
+    }
+    const double v_prev = v_f_;
+    v_f_ += VELOCITY_FILTER * (velocity - v_f_);
+    acceleration_ = dt > 0.0 ? (v_f_ - v_prev) / dt : 0.0;
+    damper_ = -c.damping * v_f_;
+    tau_desired += damper_;
+
     if (c.observer_bandwidth > 0.0)
     {
-      return observe(tau_desired, tau_measured, velocity, dt);
+      return observe(tau_desired, tau_measured, dt);
     }
     error_ = tau_desired - tau_measured;
     filtered_ = B0 * error_ + B1 * e1_ + B2 * e2_ - A1 * h1_ - A2 * h2_;
@@ -169,8 +194,9 @@ public:
     return current * config_.torque_constant * config_.gear_ratio;
   }
 
-  // The last update's terms, for logging and tuning. feedback(): lambda * H(e), 0 under the
-  // observer, whose estimate is friction().
+  // The last update's terms, for logging and tuning. error(): from the torque the loop follows,
+  // the damper's included. feedback(): lambda * H(e), 0 under the observer, whose estimate is
+  // friction(). damper(): -damping * v_f.
   double error() const { return error_; }
   double filtered() const { return filtered_; }
   double feedback() const
@@ -180,24 +206,15 @@ public:
   double acceleration() const { return acceleration_; }
   double integral() const { return integral_; }
   double friction() const { return friction_; }
+  double damper() const { return damper_; }
   double current() const { return current_; }
 
 private:
-  double observe(double tau_desired, double tau_measured, double velocity, double dt)
+  // tau_desired here has the damper in it.
+  double observe(double tau_desired, double tau_measured, double dt)
   {
     const auto & c = config_;
     error_ = tau_desired - tau_measured;
-    // The acceleration from the velocity, filtered first (the actuator's velocity is noisy):
-    // ~60 Hz at 1 kHz, below the drive's elastic mode, above the observer.
-    if (!started_)
-    {
-      v_f_ = velocity;
-      started_ = true;
-    }
-    const double v_prev = v_f_;
-    v_f_ += VELOCITY_FILTER * (velocity - v_f_);
-    acceleration_ = dt > 0.0 ? (v_f_ - v_prev) / dt : 0.0;
-
     const double residual = last_torque_ - tau_measured - c.rotor_inertia * acceleration_;
     const double moving = std::tanh(std::pow(v_f_ / c.observer_velocity_gate, 2));
     const double pushed = std::tanh(std::pow(error_ / c.observer_deadband, 4));
@@ -221,7 +238,7 @@ private:
   double e1_ = 0.0, e2_ = 0.0, h1_ = 0.0, h2_ = 0.0;
   double integral_ = 0.0;
   double error_ = 0.0, filtered_ = 0.0, friction_ = 0.0, current_ = 0.0;
-  double f_hat_ = 0.0, last_torque_ = 0.0, v_f_ = 0.0, acceleration_ = 0.0;
+  double f_hat_ = 0.0, last_torque_ = 0.0, v_f_ = 0.0, acceleration_ = 0.0, damper_ = 0.0;
   bool started_ = false;
 };
 

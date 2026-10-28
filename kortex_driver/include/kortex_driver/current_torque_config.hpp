@@ -15,6 +15,8 @@
 //   observer: bandwidth (Hz, 0: lambda * H), deadband (N*m), velocity_gate (rad/s),
 //             bound (N*m), rotor_inertia (kg m^2)          the friction observer in place of
 //                                                          lambda * H, I and F
+//   damping (N*m s/rad)                                    default 0: off; the joint damper,
+//                                                          under lambda * H or the observer
 //   safety:   speed_limit (rad/s, 0 off), kt_check_ratio, kt_check_min_torque (N*m)
 
 #ifndef KORTEX_DRIVER__CURRENT_TORQUE_CONFIG_HPP_
@@ -116,6 +118,7 @@ inline CurrentTorqueConfig parseCurrentTorqueConfig(
   const auto obs_gate = perJoint(observer, "velocity_gate", n, 0.005);
   const auto obs_bound = perJoint(observer, "bound", n, 0.0);
   const auto rotor = perJoint(observer, "rotor_inertia", n, 0.0);
+  const auto damping = perJoint(root, "damping", n, 0.0);
   std::vector<double> bound(n);
   for (std::size_t i = 0; i < n; ++i)
   {
@@ -160,6 +163,7 @@ inline CurrentTorqueConfig parseCurrentTorqueConfig(
         (!(obs_deadband[i] > 0.0) || !(obs_gate[i] > 0.0) || !(obs_bound[i] > 0.0) ||
          !(rotor[i] >= 0.0)))
       bad("observer: deadband, velocity_gate and bound must be > 0, rotor_inertia >= 0" + j);
+    if (!(damping[i] >= 0.0)) bad("damping must be >= 0" + j);
     CurrentTorqueJointConfig c;
     c.lambda = lambda[i];
     c.torque_constant = kt[i];
@@ -179,6 +183,7 @@ inline CurrentTorqueConfig parseCurrentTorqueConfig(
     c.observer_velocity_gate = obs_gate[i];
     c.observer_bound = obs_bound[i];
     c.rotor_inertia = rotor[i];
+    c.damping = damping[i];
     config.joints.push_back(c);
   }
   return config;

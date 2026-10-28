@@ -263,7 +263,7 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
   arm_efforts_.resize(actuator_count_, std::numeric_limits<double>::quiet_NaN());
   for (auto * v : {&arm_efforts_sent_, &arm_motor_currents_, &arm_currents_sent_,
                    &arm_torque_errors_, &arm_torque_feedbacks_, &arm_torque_integrals_,
-                   &arm_torque_frictions_})
+                   &arm_torque_frictions_, &arm_torque_dampers_})
   {
     v->assign(actuator_count_, 0.0);
   }
@@ -460,7 +460,8 @@ CallbackReturn KortexMultiInterfaceHardware::on_init(
                       ? " (smooth, v_s " + std::to_string(c.velocity_scale) + " rad/s)"
                       : std::string(" (switched)"))
                 << "; integral " << c.integral_gain << "/s, "
-                << c.integral_leak << " s, +-" << c.integral_bound << " N*m";
+                << c.integral_leak << " s, +-" << c.integral_bound << " N*m; damping "
+                << c.damping << " N*m s/rad";
         if (c.observer_bandwidth > 0.0)
         {
           summary << "; FRICTION OBSERVER " << c.observer_bandwidth << " Hz in place of lambda, "
@@ -584,6 +585,8 @@ KortexMultiInterfaceHardware::export_state_interfaces()
       arm_joint_names[i], "torque_integral", &arm_torque_integrals_[i]));
     state_interfaces.emplace_back(hardware_interface::StateInterface(
       arm_joint_names[i], "torque_friction", &arm_torque_frictions_[i]));
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+      arm_joint_names[i], "torque_damper", &arm_torque_dampers_[i]));
   }
 
   // state interface which reports if robot is faulted
@@ -1550,6 +1553,7 @@ void KortexMultiInterfaceHardware::prepareCommands()
         arm_torque_feedbacks_[i] = current_loops_[i].feedback();
         arm_torque_integrals_[i] = current_loops_[i].integral();
         arm_torque_frictions_[i] = current_loops_[i].friction();
+        arm_torque_dampers_[i] = current_loops_[i].damper();
       }
       else
       {
@@ -1801,6 +1805,7 @@ void KortexMultiInterfaceHardware::clearCurrentLoopStates(std::size_t i)
   arm_torque_feedbacks_[i] = 0.0;
   arm_torque_integrals_[i] = 0.0;
   arm_torque_frictions_[i] = 0.0;
+  arm_torque_dampers_[i] = 0.0;
 }
 
 bool KortexMultiInterfaceHardware::currentTorqueConstantsAgree()

@@ -201,6 +201,7 @@ private:
   std::vector<double> arm_torque_feedbacks_;  // N*m, lambda * H(e)
   std::vector<double> arm_torque_integrals_;  // N*m
   std::vector<double> arm_torque_frictions_;  // N*m, the friction compensation
+  std::vector<double> arm_torque_dampers_;    // N*m, -damping * v
   void clearCurrentLoopStates(std::size_t i);
 
   // twist command interfaces
